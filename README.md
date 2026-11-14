@@ -8,8 +8,9 @@ Designed for developers who frequently hop across Linux distributions (**Fedora*
 
 ## Key Features
 
+* **Automated Preflight & Self-Bootstrapping (`preflight_check`):** Validates `aarch64` UEFI mode, verifies `btrfs-progs >= 6.1`, auto-installs missing host CLI tools (`debootstrap`, `sbsigntools`, `mokutil`, `efibootmgr`) via `dnf`/`apt-get`, and downloads/stages upstream `rEFInd` ARM64 binaries and Btrfs EFI drivers automatically.
 * **Folder-Isolated Btrfs Subvolume Hierarchy:** Every OS lives in its own top-level folder (`<os_id>/@*`) inside `subvolid=5`, eliminating cross-distro file collisions while sharing `shared/@projects`, `shared/@containers`, `shared/@libvirt`, and `shared/@swap`.
-* **End-to-End ARM64 UEFI Secure Boot:** Chains Microsoft-CA-signed `shimaa64.efi` → locally MOK-signed **rEFInd** (`grubaa64.efi`) → signed kernels and automatic out-of-tree module signing (`akmods` on Fedora, `DKMS` on Debian, `kernel-hooks.d` on Alpine).
+* **End-to-End ARM64 UEFI Secure Boot:** Chains Microsoft-CA-signed `shimaa64.efi` → locally MOK-signed **rEFInd** (`grubaa64.efi`) + MOK-signed `btrfs_aa64.efi` → signed kernels and automatic out-of-tree module signing (`akmods` on Fedora, `DKMS` on Debian, `kernel-hooks.d` on Alpine).
 * **Automated Snapper Baseline & Rollbacks:** Initializes Snapper (`root` config) mapped to `<os_id>/@snapshots`, configures automatic `dnf5`/`apt` pre/post transaction hooks and OpenRC cron jobs, and creates an immediate `Snapshot #1` clean baseline.
 * **NVMe & Windows 11 ARM64 KVM Ready:** Pre-provisions `shared/@libvirt` (`nodatacow`), installs QEMU/libvirt + `edk2-aarch64` (`AAVMF`) + `swtpm` (TPM 2.0), stages `virtio-win.iso`, and tunes NVMe APST latency (`nvme_core.default_ps_max_latency_us=0`).
 * **Non-Destructive Single-OS Lifecycle Management:** Add, wipe, roll back, or reinstall any individual OS folder without touching shared developer data or requiring re-enrollment of your UEFI Machine Owner Key (MOK).
@@ -36,7 +37,7 @@ Designed for developers who frequently hop across Linux distributions (**Fedora*
 | Partition | Size | Filesystem | Label | Mount Point / Purpose |
 | :--- | :--- | :--- | :--- | :--- |
 | **Part 1** | `512 MiB` | `FAT32` (ESP) | `EFI` | `/boot/efi` — Shared UEFI System Partition (`shim`, `rEFInd`, `MOK.der`) |
-| **Part 2** | `4 GiB` | `ext4` | `FEDORA_BOOT` | `/boot` — Dedicated unencrypted/GRUB-friendly boot partition for Fedora |
+| **Part 2** | `4 GiB` | `ext4` | `FEDORA_BOOT` | `/boot` — Dedicated boot partition for Fedora |
 | **Part 3** | `Remainder` | `Btrfs` | `MULTIBOOT_POOL` | Main Btrfs pool (`subvolid=5`) hosting `shared/` and `<os_id>/` folders |
 
 ### Btrfs Pool Layout (`subvolid=5`)
@@ -69,11 +70,8 @@ MULTIBOOT_POOL (subvolid=5)
 
 ## Prerequisites
 
-Run the installer from an **ARM64 (`aarch64`) Live Linux environment** (e.g., Fedora or Arch ARM64 Live ISO) with root privileges and the following CLI utilities installed:
-
-* **Partitioning & Filesystems:** `parted`, `gptfdisk` (`sgdisk`), `util-linux` (`wipefs`, `blkid`), `dosfstools`, `e2fsprogs`, `btrfs-progs` (v6.1+ for `mkswapfile`)
-* **Bootstrapping & Downloads:** `python3` (3.9+), `dnf` (or `dnf5`), `debootstrap`, `curl`, `tar`
-* **UEFI & Secure Boot:** `refind`, `sbsigntools`, `openssl`, `mokutil`, `efibootmgr`
+* **Recommended Live Environment:** Boot from a **Fedora Workstation or KDE ARM64 (`aarch64`) Live ISO** in UEFI mode (works with UEFI Secure Boot enabled out of the box and includes native `dnf5` + `btrfs-progs >= 6.1`).
+* **Automatic Dependency Resolution:** `preflight_check()` automatically detects and offers to install any missing host packages (`debootstrap`, `sbsigntools`, `mokutil`, `efibootmgr`, `gdisk`, `parted`, `dosfstools`, `e2fsprogs`) and stages upstream `rEFInd` (`0.14.2` `aarch64`) before touching any disk.
 
 ---
 
@@ -91,11 +89,11 @@ chmod +x multi_distro_installer.py multiboot_maint.py
 sudo ./multi_distro_installer.py
 ```
 
-The installer will interactively prompt for:
-1. **Target Block Device** (e.g., `/dev/nvme0n1`) with an explicit `WIPE <device>` confirmation guard.
-2. **Target OS Selection** (comma-separated list of distros to deploy).
-3. **Installation Source** (fetch from Internet with local caching under `/var/cache/multiboot_installer`, or install offline from preseeded cache).
-4. **Unified Developer User** (enforces `UID 1000` / `GID 1000` and sets user, root, and MOK enrollment passwords).
+1. **Preflight Check:** Confirms `aarch64` UEFI environment and installs/stages any missing host dependencies.
+2. **Target Block Device:** Enter the target drive (e.g., `/dev/nvme0n1`) and type `WIPE <device>` to confirm.
+3. **Target OS Selection:** Enter comma-separated numbers of the distros to deploy.
+4. **Installation Source:** Fetch from Internet (with local caching under `/var/cache/multiboot_installer`) or install offline from a preseeded cache.
+5. **Unified Developer User:** Enforces `UID 1000` / `GID 1000` across all distros and sets user, root, and MOK enrollment passwords.
 
 ### 2. First-Boot Secure Boot MOK Enrollment
 
@@ -128,7 +126,9 @@ sudo ./multiboot_maint.py
 
 ```text
 .
-├── multi_distro_installer.py   # Full disk partitioning, subvolume creation, chroot bootstrap & Secure Boot setup
+├── .github/workflows/ci.yml    # GitHub Actions CI (Ruff lint/format, Mypy typecheck, import smoke test)
+├── .gitignore                  # Protects MOK private keys, caches, ISOs, and Python bytecode
+├── multi_distro_installer.py   # Preflight check, partitioning, subvolumes, chroot bootstrap & Secure Boot
 ├── multiboot_maint.py          # Interactive pool inspector, Snapper rollback, rEFInd sync & single-OS installer
 └── README.md                   # Architecture & usage documentation
 ```
