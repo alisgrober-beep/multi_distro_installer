@@ -1,0 +1,44 @@
+# ==========================================
+# Security-Sensitive Files (MOK & Keys)
+# ==========================================
+*.key
+*.priv
+*.der
+*.crt
+*.pem
+mok/
+
+# ==========================================
+# Local Installer Caches, ISOs & Rootfs
+# ==========================================
+cache/
+*.iso
+*.tar.gz
+*.tar.xz
+*.img
+*.qcow2
+
+# ==========================================
+# Python Bytecode & Environments
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ==========================================
+# Editor, OS & Temporary Files
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
