@@ -1,0 +1,140 @@
+# Multi-Distro ARM64 Btrfs Developer Workstation & Secure Boot Bootstrapper
+
+An automated Python installation and maintenance toolkit for building a **multi-distro ARM64 (`aarch64`) developer workstation** on a single Btrfs storage pool.
+
+Designed for developers who frequently hop across Linux distributions (**Fedora**, **Debian**, **Alpine**) and standard libraries (**`glibc`** ↔ **`musl`**) while keeping source code, container images, and KVM virtual machine disks completely isolated from OS rollbacks and reinstalls.
+
+---
+
+## Key Features
+
+* **Folder-Isolated Btrfs Subvolume Hierarchy:** Every OS lives in its own top-level folder (`<os_id>/@*`) inside `subvolid=5`, eliminating cross-distro file collisions while sharing `shared/@projects`, `shared/@containers`, `shared/@libvirt`, and `shared/@swap`.
+* **End-to-End ARM64 UEFI Secure Boot:** Chains Microsoft-CA-signed `shimaa64.efi` → locally MOK-signed **rEFInd** (`grubaa64.efi`) → signed kernels and automatic out-of-tree module signing (`akmods` on Fedora, `DKMS` on Debian, `kernel-hooks.d` on Alpine).
+* **Automated Snapper Baseline & Rollbacks:** Initializes Snapper (`root` config) mapped to `<os_id>/@snapshots`, configures automatic `dnf5`/`apt` pre/post transaction hooks and OpenRC cron jobs, and creates an immediate `Snapshot #1` clean baseline.
+* **NVMe & Windows 11 ARM64 KVM Ready:** Pre-provisions `shared/@libvirt` (`nodatacow`), installs QEMU/libvirt + `edk2-aarch64` (`AAVMF`) + `swtpm` (TPM 2.0), stages `virtio-win.iso`, and tunes NVMe APST latency (`nvme_core.default_ps_max_latency_us=0`).
+* **Non-Destructive Single-OS Lifecycle Management:** Add, wipe, roll back, or reinstall any individual OS folder without touching shared developer data or requiring re-enrollment of your UEFI Machine Owner Key (MOK).
+
+---
+
+## Supported Target Operating Systems (`aarch64`)
+
+| ID | Distribution | Desktop / Compositor | Init / libc | Display Manager Subvolume |
+| :--- | :--- | :--- | :--- | :--- |
+| `fedora_kde` | Fedora KDE | KDE Plasma | `systemd` / `glibc` | `fedora_kde/@sddm` |
+| `fedora_gnome` | Fedora GNOME | GNOME Workstation | `systemd` / `glibc` | `fedora_gnome/@gdm` |
+| `debian_gnome` | Debian GNOME | GNOME | `systemd` / `glibc` | `debian_gnome/@gdm3` |
+| `debian_kde` | Debian KDE | KDE Plasma | `systemd` / `glibc` | `debian_kde/@sddm` |
+| `alpine_xfce` | Alpine Linux | XFCE4 | `OpenRC` / `musl` | *(Root-contained)* |
+| `alpine_sway` | Alpine Linux | Sway (Wayland + `seatd`) | `OpenRC` / `musl` | *(TTY / `seatd`)* |
+
+---
+
+## Disk Partition & Btrfs Subvolume Architecture
+
+### GPT Partition Table
+
+| Partition | Size | Filesystem | Label | Mount Point / Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **Part 1** | `512 MiB` | `FAT32` (ESP) | `EFI` | `/boot/efi` — Shared UEFI System Partition (`shim`, `rEFInd`, `MOK.der`) |
+| **Part 2** | `4 GiB` | `ext4` | `FEDORA_BOOT` | `/boot` — Dedicated unencrypted/GRUB-friendly boot partition for Fedora |
+| **Part 3** | `Remainder` | `Btrfs` | `MULTIBOOT_POOL` | Main Btrfs pool (`subvolid=5`) hosting `shared/` and `<os_id>/` folders |
+
+### Btrfs Pool Layout (`subvolid=5`)
+
+```text
+MULTIBOOT_POOL (subvolid=5)
+├── shared/
+│   ├── @projects              -> /srv/projects (symlinked to ~/Projects, UID/GID 1000)
+│   ├── @containers            -> /var/lib/containers (OCI images shared across distros)
+│   ├── @libvirt               -> /var/lib/libvirt/images (nodatacow, VM disks + virtio-win.iso)
+│   └── @swap                  -> /swap (nodatacow, holds per-distro swapfile_<os_id>)
+├── fedora_kde/
+│   ├── @                      -> /
+│   ├── @home                  -> /home (isolated glibc/desktop dotfiles)
+│   ├── @snapshots             -> /.snapshots
+│   ├── @var_log               -> /var/log
+│   ├── @var_cache             -> /var/cache
+│   ├── @var_tmp               -> /var/tmp
+│   └── @sddm                  -> /var/lib/sddm
+├── debian_gnome/
+│   └── (@, @home, @snapshots, @var_log, @var_cache, @var_tmp, @gdm3)
+└── alpine_sway/
+    └── (@, @home, @snapshots, @var_log, @var_cache, @var_tmp)
+```
+
+> **Why isolate `@home` per distro?**
+> Sharing `/home` between `glibc` distros (Fedora, Debian) and `musl` distros (Alpine) causes compiled language caches (`~/.cargo`, `~/.npm`, Python `venv`) to fail with binary incompatibility errors. Isolating `<os_id>/@home` while mounting `shared/@projects` inside each OS gives you clean builds everywhere.
+
+---
+
+## Prerequisites
+
+Run the installer from an **ARM64 (`aarch64`) Live Linux environment** (e.g., Fedora or Arch ARM64 Live ISO) with root privileges and the following CLI utilities installed:
+
+* **Partitioning & Filesystems:** `parted`, `gptfdisk` (`sgdisk`), `util-linux` (`wipefs`, `blkid`), `dosfstools`, `e2fsprogs`, `btrfs-progs` (v6.1+ for `mkswapfile`)
+* **Bootstrapping & Downloads:** `python3` (3.9+), `dnf` (or `dnf5`), `debootstrap`, `curl`, `tar`
+* **UEFI & Secure Boot:** `refind`, `sbsigntools`, `openssl`, `mokutil`, `efibootmgr`
+
+---
+
+## Installation & Usage
+
+Place both scripts in the same directory (e.g., `/usr/local/sbin/`):
+
+```bash
+chmod +x multi_distro_installer.py multiboot_maint.py
+```
+
+### 1. Fresh Multi-Distro Disk Installation
+
+```bash
+sudo ./multi_distro_installer.py
+```
+
+The installer will interactively prompt for:
+1. **Target Block Device** (e.g., `/dev/nvme0n1`) with an explicit `WIPE <device>` confirmation guard.
+2. **Target OS Selection** (comma-separated list of distros to deploy).
+3. **Installation Source** (fetch from Internet with local caching under `/var/cache/multiboot_installer`, or install offline from preseeded cache).
+4. **Unified Developer User** (enforces `UID 1000` / `GID 1000` and sets user, root, and MOK enrollment passwords).
+
+### 2. First-Boot Secure Boot MOK Enrollment
+
+1. Reboot into your target drive.
+2. `shimaa64.efi` will automatically launch **MokManager** (blue UEFI screen).
+3. Select **Enroll MOK** → **Continue** → **Yes**, enter the password configured during installation, and reboot.
+4. **rEFInd** will boot under full UEFI Secure Boot with menu entries for all installed systems.
+
+---
+
+## Maintenance, Rollbacks & Single-OS Management
+
+Run `multiboot_maint.py` from **any booted distro** on the machine or from a **Live USB**:
+
+```bash
+sudo ./multiboot_maint.py
+```
+
+### Available Operations
+
+1. **Inspect Btrfs pool & Snapper snapshots:** Displays all `shared/` and `<os_id>/` subvolumes, highlights the currently booted OS, and lists available Snapper snapshot IDs.
+2. **Atomic Snapper rollback (`<os_id>/@`):** Moves the active `<os_id>/@` aside to `<os_id>/@_pre_rollback_<timestamp>` and creates a read-write Btrfs snapshot from your chosen Snapper snapshot ID.
+3. **Wipe a single OS:** Deletes all snapshots, subvolumes, swapfile, and rEFInd menu entry for one OS folder while leaving `shared/@projects`, `shared/@containers`, `shared/@libvirt`, and other OSes intact.
+4. **Sync rEFInd kernel/initrd entries:** Re-scans `/boot` and `<os_id>/@/boot` after kernel updates or rollbacks and regenerates `refind.conf`.
+5. **Add / Reinstall a single OS:** Deploys a new distro folder (or cleanly replaces an existing one) into `MULTIBOOT_POOL`, reusing your existing enrolled MOK keys automatically.
+
+---
+
+## Repository Structure
+
+```text
+.
+├── multi_distro_installer.py   # Full disk partitioning, subvolume creation, chroot bootstrap & Secure Boot setup
+├── multiboot_maint.py          # Interactive pool inspector, Snapper rollback, rEFInd sync & single-OS installer
+└── README.md                   # Architecture & usage documentation
+```
+
+---
+
+## License
+
+MIT License. Use at your own risk—always verify target block device paths before confirming disk wipe operations.
