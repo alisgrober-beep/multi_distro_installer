@@ -11,6 +11,8 @@ CACHE_DIR = Path("/var/cache/multiboot_installer")
 MOK_DIR = CACHE_DIR / "mok"
 MOUNT_ROOT = Path("/mnt/multiboot_target")
 BTRFS_OPTS = "defaults,noatime,compress=zstd:1,space_cache=v2"
+BTRFS_NOCOW_OPTS = "defaults,noatime,nodatacow"
+VIRTIO_WIN_URL = "https://fedorapeople.org"
 
 DISTROS = {
     "1": {
@@ -137,7 +139,6 @@ def generate_local_mok() -> dict:
     mok_crt = MOK_DIR / "MOK.crt"
     mok_der = MOK_DIR / "MOK.der"
 
-    # Reuse running OS MOK if available and cache is empty
     live_mok = Path("/etc/secureboot-mok")
     if not mok_key.exists() and (live_mok / "MOK.key").exists():
         shutil.copy2(live_mok / "MOK.key", mok_key)
@@ -226,13 +227,17 @@ def select_source_mode():
 
 
 def ensure_shared_subvolumes(top_mnt: Path):
+    """Creates shared/@projects, shared/@containers, shared/@swap (nodatacow), and shared/@libvirt (nodatacow)."""
     shared_dir = top_mnt / "shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
-    for sv in ["@projects", "@containers", "@swap"]:
+    for sv in ["@projects", "@containers", "@swap", "@libvirt"]:
         sv_path = shared_dir / sv
         if not sv_path.exists():
             run(["btrfs", "subvolume", "create", str(sv_path)])
+
+    # Disable Copy-on-Write on @swap and @libvirt for optimal NVMe VM I/O and swapfiles
     run(["chattr", "+C", str(shared_dir / "@swap")])
+    run(["chattr", "+C", str(shared_dir / "@libvirt")])
 
 
 def create_single_os_subvolumes(top_mnt: Path, distro: dict):
@@ -275,48 +280,58 @@ def wipe_os_folder_subvolumes(top_mnt: Path, os_id: str):
 
 def create_btrfs_subvolumes(p_btrfs: str, selected_distros: list):
     top_mnt = MOUNT_ROOT / "btrfs_top"
-    top_mnt.mkdir(parents=True, exist_ok=True)
-    run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
-
-    ensure_shared_subvolumes(top_mnt)
-    for d in selected_distros:
-        create_single_os_subvolumes(top_mnt, d)
-
-    run(["umount", str(top_mnt)])
-
-
+top_mnt.mkdir(parents=True, exist_ok=True)
+run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
+ensure_shared_subvolumes(top_mnt)
+for d in selected_distros:
+create_single_os_subvolumes(top_mnt, d)
+run(["umount", str(top_mnt)])
 def create_distro_swapfile(target_root: Path, distro_id: str, size_gb: int):
-    swap_file = target_root / "swap" / f"swapfile_{distro_id}"
-    if not swap_file.exists():
-
-Use code with caution.
+swap_file = target_root / "swap" / f"swapfile_{distro_id}"
+if not swap_file.exists():
 print(f"Creating {size_gb}G Btrfs swapfile for {distro_id}...")
 run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
+def provision_virtio_win_iso(target_root: Path, source_mode: str):
+"""Stages virtio-win.iso into shared/@libvirt (/var/lib/libvirt/images) for Windows ARM64 VMs."""
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+cached_iso = CACHE_DIR / "virtio-win.iso"
+libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
+libvirt_images.mkdir(parents=True, exist_ok=True)
+target_iso = libvirt_images / "virtio-win.iso"
+if target_iso.exists():
+return
+if not cached_iso.exists() and source_mode == "internet":
+print("--- Downloading virtio-win.iso for Windows ARM64 KVM Guest Drivers ---")
+run(["curl", "-L", "--fail", "-o", str(cached_iso), VIRTIO_WIN_URL], check=False)
+if cached_iso.exists():
+shutil.copy2(cached_iso, target_iso)
+target_iso.chmod(0o644)
 def generate_fstab(target_root: Path, p_efi: str, p_boot: str, p_btrfs: str, distro: dict):
 did = distro["id"]
 uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
 uuid_efi = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_efi], text=True).strip()
 uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
 lines = [
-f"# /etc/fstab generated for {distro['name']} (Folder-isolated Btrfs layout)",
-f"UUID={uuid_btrfs} / btrfs subvol={did}/@,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /home btrfs subvol={did}/@home,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /.snapshots btrfs subvol={did}/@snapshots,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /var/log btrfs subvol={did}/@var_log,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /var/cache btrfs subvol={did}/@var_cache,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /var/tmp btrfs subvol={did}/@var_tmp,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /srv/projects btrfs subvol=shared/@projects,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /var/lib/containers btrfs subvol=shared/@containers,{BTRFS_OPTS} 0 0",
-f"UUID={uuid_btrfs} /swap btrfs subvol=shared/@swap,defaults,noatime 0 0",
-f"/swap/swapfile_{did} none swap defaults,pri=10 0 0",
-f"UUID={uuid_efi} /boot/efi vfat umask=0077 0 2",
+f"# /etc/fstab generated for {distro['name']} (Folder-isolated Btrfs + NVMe KVM layout)",
+f"UUID={uuid_btrfs}  /                        btrfs  subvol={did}/@,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /home                    btrfs  subvol={did}/@home,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /.snapshots              btrfs  subvol={did}/@snapshots,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /var/log                 btrfs  subvol={did}/@var_log,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /var/cache               btrfs  subvol={did}/@var_cache,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /var/tmp                 btrfs  subvol={did}/@var_tmp,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /srv/projects            btrfs  subvol=shared/@projects,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /var/lib/containers      btrfs  subvol=shared/@containers,{BTRFS_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /var/lib/libvirt/images  btrfs  subvol=shared/@libvirt,{BTRFS_NOCOW_OPTS}  0 0",
+f"UUID={uuid_btrfs}  /swap                    btrfs  subvol=shared/@swap,{BTRFS_NOCOW_OPTS}  0 0",
+f"/swap/swapfile_{did}  none                   swap   defaults,pri=10  0 0",
+f"UUID={uuid_efi}    /boot/efi                vfat   umask=0077  0 2",
 ]
 if distro["dm_subvol"]:
 lines.append(
-f"UUID={uuid_btrfs} {distro['dm_mount']} btrfs subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS} 0 0"
+f"UUID={uuid_btrfs}  {distro['dm_mount']}  btrfs  subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}  0 0"
 )
 if distro["type"] == "fedora":
-lines.append(f"UUID={uuid_boot} /boot ext4 defaults 0 2")
+lines.append(f"UUID={uuid_boot}   /boot                    ext4   defaults  0 2")
 fstab_path = target_root / "etc" / "fstab"
 fstab_path.parent.mkdir(parents=True, exist_ok=True)
 fstab_path.write_text("\n".join(lines) + "\n")
@@ -427,7 +442,7 @@ hook_script.parent.mkdir(parents=True, exist_ok=True)
 hook_script.write_text(
 "#!/bin/sh\n"
 "if [ -f /boot/vmlinuz-lts ] && [ -f /etc/secureboot-mok/MOK.key ]; then\n"
-" sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt "
+"  sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt "
 "--output /boot/vmlinuz-lts /boot/vmlinuz-lts\n"
 "fi\n"
 )
@@ -440,15 +455,17 @@ passwd = user_cfg["password"]
 uid = str(user_cfg["uid"])
 gid = str(user_cfg["gid"])
 hostname = f"dev-{did.replace('_', '-')}"
-print(f"\n--- Configuring Post-Chroot User & Services for {distro['name']} ---")
+print(f"\n--- Configuring Post-Chroot User, KVM/Libvirt & Services for {distro['name']} ---")
 (target / "etc" / "hostname").write_text(f"{hostname}\n")
 with chroot_env(target):
 if dtype in ("fedora", "debian"):
 admin_group = "wheel" if dtype == "fedora" else "sudo"
 chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
+chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
+chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
 chroot_run(
 target,
-["useradd", "-m", "-u", uid, "-g", gid, "-G", admin_group, "-s", "/bin/bash", uname],
+["useradd", "-m", "-u", uid, "-g", gid, "-G", f"{admin_group},libvirt,kvm", "-s", "/bin/bash", uname],
 check=False,
 )
 chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
@@ -456,8 +473,10 @@ sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
 sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
 sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
 sudoers_dropin.chmod(0o440)
+# Enable Display Manager and Libvirt KVM daemon
 if distro["dm"]:
 chroot_run(target, ["systemctl", "enable", distro["dm"]], check=False)
+chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
 if dtype == "fedora":
 (target / ".autorelabel").touch()
 elif dtype == "alpine":
@@ -466,9 +485,14 @@ target,
 ["/sbin/apk", "add", "--no-cache", "shadow", "sudo", "doas", "bash", "sbsigntool"],
 )
 chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
+chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
+chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
 chroot_run(
 target,
-["useradd", "-m", "-u", uid, "-g", gid, "-G", "wheel,video,input,audio", "-s", "/bin/bash", uname],
+[
+"useradd", "-m", "-u", uid, "-g", gid,
+"-G", "wheel,video,input,audio,libvirt,kvm", "-s", "/bin/bash", uname,
+],
 check=False,
 )
 chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
@@ -479,14 +503,24 @@ sudoers_dropin.chmod(0o440)
 doas_conf = target / "etc" / "doas.d" / "doas.conf"
 doas_conf.parent.mkdir(parents=True, exist_ok=True)
 doas_conf.write_text("permit persist :wheel\n")
+# Ensure tun kernel module loads at boot for libvirt NAT/bridged networking
+modules_file = target / "etc" / "modules"
+existing_mods = modules_file.read_text() if modules_file.exists() else ""
+if "tun" not in existing_mods.splitlines():
+modules_file.write_text(existing_mods + ("tun\n" if existing_mods.endswith("\n") or not existing_mods else "\ntun\n"))
 if distro["dm"]:
 chroot_run(target, ["rc-update", "add", distro["dm"], "default"], check=False)
+chroot_run(target, ["rc-update", "add", "libvirtd", "default"], check=False)
 if did == "alpine_sway":
 chroot_run(target, ["usermod", "-aG", "seat", uname], check=False)
 chroot_run(target, ["rc-update", "add", "seatd", "default"], check=False)
+# Ensure shared @projects and @libvirt directories have clean ownership/permissions
 projects_dir = target / "srv" / "projects"
 projects_dir.mkdir(parents=True, exist_ok=True)
 os.chown(projects_dir, int(uid), int(gid))
+libvirt_dir = target / "var" / "lib" / "libvirt" / "images"
+libvirt_dir.mkdir(parents=True, exist_ok=True)
+libvirt_dir.chmod(0o775)
 user_proj_link = target / "home" / uname / "Projects"
 if not user_proj_link.exists():
 os.symlink("/srv/projects", user_proj_link)
@@ -500,18 +534,19 @@ did = distro["id"]
 target = MOUNT_ROOT / did
 target.mkdir(parents=True, exist_ok=True)
 run(["mount", "-o", f"subvol={did}/@,{BTRFS_OPTS}", p_btrfs, str(target)])
-for mnt, sv_path in [
-("home", f"{did}/@home"),
-(".snapshots", f"{did}/@snapshots"),
-("var/log", f"{did}/@var_log"),
-("var/cache", f"{did}/@var_cache"),
-("var/tmp", f"{did}/@var_tmp"),
-("srv/projects", "shared/@projects"),
-("var/lib/containers", "shared/@containers"),
-("swap", "shared/@swap"),
+for mnt, sv_path, opts in [
+("home", f"{did}/@home", BTRFS_OPTS),
+(".snapshots", f"{did}/@snapshots", BTRFS_OPTS),
+("var/log", f"{did}/@var_log", BTRFS_OPTS),
+("var/cache", f"{did}/@var_cache", BTRFS_OPTS),
+("var/tmp", f"{did}/@var_tmp", BTRFS_OPTS),
+("srv/projects", "shared/@projects", BTRFS_OPTS),
+("var/lib/containers", "shared/@containers", BTRFS_OPTS),
+("var/lib/libvirt/images", "shared/@libvirt", BTRFS_NOCOW_OPTS),
+("swap", "shared/@swap", BTRFS_NOCOW_OPTS),
 ]:
 (target / mnt).mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", f"subvol={sv_path},{BTRFS_OPTS}", p_btrfs, str(target / mnt)])
+run(["mount", "-o", f"subvol={sv_path},{opts}", p_btrfs, str(target / mnt)])
 if distro["dm_subvol"]:
 dm_path = target / distro["dm_mount"].lstrip("/")
 dm_path.mkdir(parents=True, exist_ok=True)
@@ -522,12 +557,14 @@ run(["mount", p_boot, str(target / "boot")])
 (target / "boot" / "efi").mkdir(parents=True, exist_ok=True)
 run(["mount", p_efi, str(target / "boot" / "efi")])
 create_distro_swapfile(target, did, distro["swap_gb"])
-print(f"\n=== Bootstrapping {distro['name']} (aarch64 / {source_mode}) ===")
+provision_virtio_win_iso(target, source_mode)
+print(f"\n=== Bootstrapping {distro['name']} (aarch64 + ARM64 KVM/AAVMF/swtpm / {source_mode}) ===")
 if distro["type"] == "fedora":
 cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora"]
 cmd = [
 "dnf", "-y", f"--installroot={target}", "--forcearch=aarch64", "--releasever=41",
-"install", "@core", "kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
+"install", "@core", "@virtualization", "edk2-aarch64", "swtpm", "swtpm-tools",
+"kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
 "sudo", "akmods", "kmodtool", "openssl", "mokutil",
 "shim-aa64", "grub2-efi-aa64", distro["desktop"],
 ] + cache_arg
@@ -548,6 +585,8 @@ target,
 [
 "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
 "linux-image-arm64", "btrfs-progs", "snapper", "sudo",
+"qemu-system-arm", "libvirt-daemon-system", "libvirt-clients",
+"qemu-efi-aarch64", "swtpm", "swtpm-tools", "virt-manager",
 "dkms", "linux-headers-arm64", "shim-signed", "grub-efi-arm64-signed",
 "mokutil", "sbsigntool", distro["desktop"],
 ],
@@ -565,6 +604,8 @@ target,
 [
 "/sbin/apk", "add", "--no-cache",
 "alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
+"qemu-system-aarch64", "qemu-img", "libvirt-daemon", "libvirt-client",
+"edk2-aarch64", "swtpm", "virt-install",
 *distro["desktop"].split(),
 ],
 )
@@ -679,10 +720,16 @@ kernel = entry["kernel"]
 initrd = entry["initrd"]
 if dtype == "fedora":
 vol_uuid = uuid_boot
-options = f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ rw quiet rhgb"
+options = (
+f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
+f"nvme_core.default_ps_max_latency_us=0 rw quiet rhgb"
+)
 elif dtype == "debian":
 vol_uuid = uuid_btrfs
-options = f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ rw quiet"
+options = (
+f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
+f"nvme_core.default_ps_max_latency_us=0 rw quiet"
+)
 else:
 vol_uuid = uuid_btrfs
 options = (
@@ -691,10 +738,10 @@ f"modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"
 )
 stanzas.extend([
 f'menuentry "{d["name"]} (Secure Boot)" {{',
-f" volume {vol_uuid}",
-f" loader {kernel}",
-f" initrd {initrd}",
-f' options "{options}"',
+f"    volume {vol_uuid}",
+f"    loader {kernel}",
+f"    initrd {initrd}",
+f'    options "{options}"',
 "}",
 "",
 ])
@@ -728,341 +775,6 @@ entry = bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, 
 boot_entries.append(entry)
 setup_refind_and_shim(disk, p_efi, p_boot, p_btrfs, boot_entries, mok, user_cfg)
 print("\n=== Installation Complete ===")
-print("Subvolume hierarchy created under subvolid=5: shared/@* and <os_folder>/@*")
-if name == "main":
-main()
-
-
----
-
-### 2. Updated Companion Maintenance & Add/Reinstall Script (`multiboot_maint.py`)
-
-Menu option **`5`** now runs **`add_or_reinstall_single_os`**, allowing you to add any new distro or cleanly wipe and reinstall an existing `<os_folder>` without touching `shared/@projects`, `shared/@containers`, or your other distros.
-
-```python
-#!/usr/bin/env python3
-import os
-import re
-import sys
-import time
-import subprocess
-from pathlib import Path
-
-# Import shared installer functions from sibling module
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import multi_distro_installer as installer
-
-POOL_MNT = Path("/mnt/multiboot_maint_pool")
-EFI_MNT = Path("/mnt/multiboot_maint_efi")
-BOOT_MNT = Path("/mnt/multiboot_maint_boot")
-
-
-def run(cmd, check=True):
-    print(f"[EXEC] {' '.join(map(str, cmd))}")
-    return subprocess.run(cmd, check=check, text=True)
-
-
-def find_partitions():
-    def by_label(label):
-        res = subprocess.run(["blkid", "-L", label], capture_output=True, text=True)
-        return res.stdout.strip() or None
-
-    p_btrfs = by_label("MULTIBOOT_POOL")
-    p_efi = by_label("EFI")
-    p_boot = by_label("FEDORA_BOOT")
-
-    if not p_btrfs:
-        p_btrfs = input("Could not auto-detect MULTIBOOT_POOL. Enter Btrfs partition (e.g., /dev/nvme0n1p3): ").strip()
-    return p_efi, p_boot, p_btrfs
-
-
-def mount_pool(p_btrfs: str):
-    POOL_MNT.mkdir(parents=True, exist_ok=True)
-    if not os.path.ismount(POOL_MNT):
-        run(["mount", "-o", "subvolid=5", p_btrfs, str(POOL_MNT)])
-
-
-def unmount_all():
-    for m in (POOL_MNT, EFI_MNT, BOOT_MNT):
-        if os.path.ismount(m):
-            run(["umount", str(m)], check=False)
-
-
-def list_installed_os_folders() -> list:
-    if not POOL_MNT.exists():
-        return []
-    folders = []
-    for item in sorted(POOL_MNT.iterdir()):
-        if item.is_dir() and item.name != "shared" and (item / "@").exists():
-            folders.append(item.name)
-    return folders
-
-
-def is_os_currently_booted(os_id: str) -> bool:
-    """Checks /proc/mounts to prevent wiping or overwriting the currently running root OS."""
-    mounts = Path("/proc/mounts").read_text()
-    return f"subvol=/{os_id}/@" in mounts or f"subvol={os_id}/@" in mounts
-
-
-def inspect_layout():
-    print("\n=== Btrfs Pool Hierarchy (subvolid=5) ===")
-    shared_dir = POOL_MNT / "shared"
-    if shared_dir.exists():
-        print("[shared/]")
-        for sub in sorted(shared_dir.iterdir()):
-            print(f"  ├── {sub.name}")
-
-    for os_id in list_installed_os_folders():
-        os_dir = POOL_MNT / os_id
-        active_tag = "  <-- (CURRENTLY BOOTED)" if is_os_currently_booted(os_id) else ""
-        print(f"\n[{os_id}/]{active_tag}")
-        for sub in sorted(os_dir.iterdir()):
-            print(f"  ├── {sub.name}")
-        snap_dir = os_dir / "@snapshots"
-        if snap_dir.exists():
-            snaps = sorted([s.name for s in snap_dir.iterdir() if s.name.isdigit()], key=int)
-            print(f"  └── Available Snapper Snapshot IDs: {', '.join(snaps) if snaps else 'None'}")
-
-
-def rollback_os():
-    os_folders = list_installed_os_folders()
-    if not os_folders:
-        print("No installed OS folders found.")
-        return
-
-    print("\nSelect OS folder to roll back:")
-    for idx, name in enumerate(os_folders, 1):
-        print(f"  [{idx}] {name}")
-    choice = input("Choice: ").strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(os_folders)):
-        print("Invalid selection.")
-        return
-
-    os_id = os_folders[int(choice) - 1]
-    os_dir = POOL_MNT / os_id
-    snap_root = os_dir / "@snapshots"
-
-    snaps = sorted([s.name for s in snap_root.iterdir() if s.name.isdigit()], key=int)
-    if not snaps:
-        print(f"No Snapper snapshots found in {os_id}/@snapshots.")
-        return
-
-    print(f"\nAvailable snapshots for '{os_id}':")
-    for sid in snaps:
-        info_xml = snap_root / sid / "info.xml"
-        desc = ""
-        if info_xml.exists():
-            m = re.search(r"<description>(.*?)</description>", info_xml.read_text())
-            if m:
-                desc = m.group(1)
-        print(f"  ID {sid}: {desc}")
-
-    target_id = input("\nEnter Snapshot ID to restore as active '@': ").strip()
-    snap_subvol = snap_root / target_id / "snapshot"
-    if not snap_subvol.exists():
-        print(f"Snapshot {target_id} does not exist.")
-        return
-
-    confirm = input(f"Confirm atomic rollback of '{os_id}/@' to Snapshot #{target_id}? [y/N]: ").strip().lower()
-    if confirm != "y":
-        print("Rollback cancelled.")
-        return
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    active_root = os_dir / "@"
-    backup_root = os_dir / f"@_pre_rollback_{ts}"
-
-    active_root.rename(backup_root)
-    run(["btrfs", "subvolume", "snapshot", str(snap_subvol), str(active_root)])
-
-    print(f"\nSuccess! '{os_id}/@' rolled back to Snapshot #{target_id}.")
-    print(f"Previous root preserved at '{os_id}/@_pre_rollback_{ts}'.")
-
-
-def wipe_single_os(p_efi: str):
-    os_folders = list_installed_os_folders()
-    if not os_folders:
-        print("No installed OS folders found.")
-        return
-
-    print("\nSelect OS folder to WIPE (shared/@projects and shared/@containers remain untouched):")
-    for idx, name in enumerate(os_folders, 1):
-        print(f"  [{idx}] {name}")
-    choice = input("Choice: ").strip()
-    if not choice.isdigit() or not (1 <= int(choice) <= len(os_folders)):
-        print("Invalid selection.")
-        return
-
-    os_id = os_folders[int(choice) - 1]
-    if is_os_currently_booted(os_id):
-        print(f"Error: '{os_id}' is currently booted! Boot into another OS or Live USB to wipe it.")
-        return
-
-    confirm = input(f"Type 'DELETE {os_id}' to permanently wipe this OS and its swapfile: ").strip()
-    if confirm != f"DELETE {os_id}":
-        print("Aborted.")
-        return
-
-    installer.wipe_os_folder_subvolumes(POOL_MNT, os_id)
-
-    if p_efi:
-        EFI_MNT.mkdir(parents=True, exist_ok=True)
-        run(["mount", p_efi, str(EFI_MNT)])
-        refind_conf = EFI_MNT / "EFI" / "refind" / "refind.conf"
-        if refind_conf.exists():
-            text = refind_conf.read_text()
-            cleaned = re.sub(
-                rf'menuentry ".*?" \{{\s*[^}}]*?subvol={re.escape(os_id)}/@[^}}]*?\}}\s*',
-                "",
-                text,
-                flags=re.DOTALL,
-            )
-            refind_conf.write_text(cleaned)
-            print(f"Removed '{os_id}' boot entry from refind.conf.")
-        run(["umount", str(EFI_MNT)])
-
-    print(f"\n'{os_id}' has been completely removed.")
-
-
-def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
-    """Installs a new OS folder or cleanly replaces an existing one in MULTIBOOT_POOL."""
-    if not (p_efi and p_boot and p_btrfs):
-        print("Error: Missing EFI, FEDORA_BOOT, or MULTIBOOT_POOL partition.")
-        return
-
-    selected = installer.select_distros(single_mode=True)
-    distro = selected[0]
-    os_id = distro["id"]
-
-    if is_os_currently_booted(os_id):
-        print(f"Error: '{os_id}' is currently booted! Boot into another OS or Live USB to reinstall it.")
-        return
-
-    if (POOL_MNT / os_id).exists():
-        ans = input(f"\n'{os_id}/' already exists. Type 'REINSTALL {os_id}' to wipe & replace it: ").strip()
-        if ans != f"REINSTALL {os_id}":
-            print("Reinstall cancelled.")
-            return
-        installer.wipe_os_folder_subvolumes(POOL_MNT, os_id)
-
-    source_mode = installer.select_source_mode()
-    user_cfg = installer.prompt_user_config(include_mok_note=False)
-    mok = installer.generate_local_mok()
-
-    # Ensure shared/ and <os_id>/ subvolumes exist
-    installer.ensure_shared_subvolumes(POOL_MNT)
-    installer.create_single_os_subvolumes(POOL_MNT, distro)
-
-    # Bootstrap into <os_id>/@
-    installer.bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
-
-    # Sync rEFInd menu entries for all installed distros
-    sync_refind_kernels(p_efi, p_boot, p_btrfs)
-    print(f"\n=== {distro['name']} ({os_id}/) successfully installed and added to rEFInd! ===")
-
-
-def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
-    if not p_efi:
-        print("EFI partition not found.")
-        return
-
-    uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
-    uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip() if p_boot else ""
-
-    EFI_MNT.mkdir(parents=True, exist_ok=True)
-    run(["mount", p_efi, str(EFI_MNT)])
-
-    if p_boot:
-        BOOT_MNT.mkdir(parents=True, exist_ok=True)
-        run(["mount", p_boot, str(BOOT_MNT)])
-
-    stanzas = [
-        "# Synced by Multi-Distro Maintenance Helper",
-        "timeout 10",
-        "use_nvram false",
-        "scanfor manual,external",
-        "",
-    ]
-
-    for os_id in list_installed_os_folders():
-        root_dir = POOL_MNT / os_id / "@"
-        pretty_name = os_id.replace("_", " ").title()
-
-        if os_id.startswith("fedora") and p_boot:
-            kernels = sorted(BOOT_MNT.glob("vmlinuz-*"))
-            initrds = sorted(BOOT_MNT.glob("initramfs-*.img"))
-            if kernels and initrds:
-                stanzas.extend([
-                    f'menuentry "{pretty_name} (Secure Boot)" {{',
-                    f"    volume {uuid_boot}",
-                    f"    loader /{kernels[-1].name}",
-                    f"    initrd /{initrds[-1].name}",
-                    f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet rhgb"',
-                    "}",
-                    "",
-                ])
-        elif os_id.startswith("debian"):
-            boot_dir = root_dir / "boot"
-            kernels = sorted(boot_dir.glob("vmlinuz-*"))
-            initrds = sorted(boot_dir.glob("initrd.img-*"))
-            if kernels and initrds:
-                stanzas.extend([
-                    f'menuentry "{pretty_name} (Secure Boot)" {{',
-                    f"    volume {uuid_btrfs}",
-
-f" loader /{os_id}/@/boot/{kernels[-1].name}",
-f" initrd /{os_id}/@/boot/{initrds[-1].name}",
-f' options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet"',
-"}",
-"",
-])
-elif os_id.startswith("alpine"):
-stanzas.extend([
-f'menuentry "{pretty_name} (Secure Boot)" {{',
-f" volume {uuid_btrfs}",
-f" loader /{os_id}/@/boot/vmlinuz-lts",
-f" initrd /{os_id}/@/boot/initramfs-lts",
-f' options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
-"}",
-"",
-])
-refind_conf = EFI_MNT / "EFI" / "refind" / "refind.conf"
-refind_conf.parent.mkdir(parents=True, exist_ok=True)
-refind_conf.write_text("\n".join(stanzas))
-print("Updated refind.conf with latest kernel & initrd versions.")
-if p_boot and os.path.ismount(BOOT_MNT):
-run(["umount", str(BOOT_MNT)])
-run(["umount", str(EFI_MNT)])
-def main():
-if os.geteuid() != 0:
-sys.exit("Run this maintenance helper as root.")
-p_efi, p_boot, p_btrfs = find_partitions()
-try:
-mount_pool(p_btrfs)
-while True:
-print("\n=== Multi-Distro Btrfs Rollback & Maintenance Helper ===")
-print(" Inspect Btrfs pool & Snapper snapshots")
-print(" Atomic Snapper rollback (<os_folder>/@)")
-print(" Wipe a single OS (<os_folder> + swapfile + rEFInd entry)")
-print(" Sync rEFInd kernel/initrd entries after kernel updates")
-print(" Add / Reinstall a single OS into existing pool")
-print(" Exit")
-choice = input("Select action: ").strip()
-if choice == "1":
-inspect_layout()
-elif choice == "2":
-rollback_os()
-elif choice == "3":
-wipe_single_os(p_efi)
-elif choice == "4":
-sync_refind_kernels(p_efi, p_boot, p_btrfs)
-elif choice == "5":
-add_or_reinstall_single_os(p_efi, p_boot, p_btrfs)
-elif choice == "6":
-break
-else:
-print("Invalid choice.")
-finally:
-unmount_all()
+print("Btrfs hierarchy ready: shared/@projects, shared/@containers, shared/@libvirt (nodatacow), shared/@swap")
 if name == "main":
 main()

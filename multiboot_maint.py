@@ -6,7 +6,6 @@ import time
 import subprocess
 from pathlib import Path
 
-# Import shared installer functions from sibling module
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import multi_distro_installer as installer
 
@@ -57,7 +56,6 @@ def list_installed_os_folders() -> list:
 
 
 def is_os_currently_booted(os_id: str) -> bool:
-    """Checks /proc/mounts to prevent wiping or overwriting the currently running root OS."""
     mounts = Path("/proc/mounts").read_text()
     return f"subvol=/{os_id}/@" in mounts or f"subvol={os_id}/@" in mounts
 
@@ -68,7 +66,8 @@ def inspect_layout():
     if shared_dir.exists():
         print("[shared/]")
         for sub in sorted(shared_dir.iterdir()):
-            print(f"  ├── {sub.name}")
+            nocow_tag = " (nodatacow)" if sub.name in ("@swap", "@libvirt") else ""
+            print(f"  ├── {sub.name}{nocow_tag}")
 
     for os_id in list_installed_os_folders():
         os_dir = POOL_MNT / os_id
@@ -143,7 +142,7 @@ def wipe_single_os(p_efi: str):
         print("No installed OS folders found.")
         return
 
-    print("\nSelect OS folder to WIPE (shared/@projects and shared/@containers remain untouched):")
+    print("\nSelect OS folder to WIPE (shared/@projects, shared/@containers, shared/@libvirt remain untouched):")
     for idx, name in enumerate(os_folders, 1):
         print(f"  [{idx}] {name}")
     choice = input("Choice: ").strip()
@@ -183,13 +182,12 @@ def wipe_single_os(p_efi: str):
 
 
 def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
-    """Installs a new OS folder or cleanly replaces an existing one in MULTIBOOT_POOL."""
     if not (p_efi and p_boot and p_btrfs):
         print("Error: Missing EFI, FEDORA_BOOT, or MULTIBOOT_POOL partition.")
         return
 
     selected = installer.select_distros(single_mode=True)
-    distro = selected[0]
+    distro = selected
     os_id = distro["id"]
 
     if is_os_currently_booted(os_id):
@@ -207,16 +205,13 @@ def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
     user_cfg = installer.prompt_user_config(include_mok_note=False)
     mok = installer.generate_local_mok()
 
-    # Ensure shared/ and <os_id>/ subvolumes exist
     installer.ensure_shared_subvolumes(POOL_MNT)
     installer.create_single_os_subvolumes(POOL_MNT, distro)
 
-    # Bootstrap into <os_id>/@
     installer.bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
 
-    # Sync rEFInd menu entries for all installed distros
     sync_refind_kernels(p_efi, p_boot, p_btrfs)
-    print(f"\n=== {distro['name']} ({os_id}/) successfully installed and added to rEFInd! ===")
+    print(f"\n=== {distro['name']} ({os_id}/) successfully installed with KVM/libvirt & added to rEFInd! ===")
 
 
 def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
@@ -267,20 +262,19 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
                 stanzas.extend([
                     f'menuentry "{pretty_name} (Secure Boot)" {{',
                     f"    volume {uuid_btrfs}",
-
-f" loader /{os_id}/@/boot/{kernels[-1].name}",
-f" initrd /{os_id}/@/boot/{initrds[-1].name}",
-f' options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet"',
+                    f"    loader /{os_id}/@/boot/{kernels[-1].name}",
+                    f"    initrd /{os_id}/@/boot/{initrds[-1].name}",
+f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet"',
 "}",
 "",
 ])
 elif os_id.startswith("alpine"):
 stanzas.extend([
 f'menuentry "{pretty_name} (Secure Boot)" {{',
-f" volume {uuid_btrfs}",
-f" loader /{os_id}/@/boot/vmlinuz-lts",
-f" initrd /{os_id}/@/boot/initramfs-lts",
-f' options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
+f"    volume {uuid_btrfs}",
+f"    loader /{os_id}/@/boot/vmlinuz-lts",
+f"    initrd /{os_id}/@/boot/initramfs-lts",
+f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
 "}",
 "",
 ])
@@ -299,12 +293,12 @@ try:
 mount_pool(p_btrfs)
 while True:
 print("\n=== Multi-Distro Btrfs Rollback & Maintenance Helper ===")
-print(" Inspect Btrfs pool & Snapper snapshots")
-print(" Atomic Snapper rollback (<os_folder>/@)")
-print(" Wipe a single OS (<os_folder> + swapfile + rEFInd entry)")
-print(" Sync rEFInd kernel/initrd entries after kernel updates")
-print(" Add / Reinstall a single OS into existing pool")
-print(" Exit")
+print("  Inspect Btrfs pool & Snapper snapshots")
+print("  Atomic Snapper rollback (<os_folder>/@)")
+print("  Wipe a single OS (<os_folder> + swapfile + rEFInd entry)")
+print("  Sync rEFInd kernel/initrd entries after kernel updates")
+print("  Add / Reinstall a single OS into existing pool")
+print("  Exit")
 choice = input("Select action: ").strip()
 if choice == "1":
 inspect_layout()
