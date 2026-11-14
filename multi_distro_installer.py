@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import os
-import sys
-import getpass
+import platform
 import shutil
 import subprocess
+import sys
+import getpass
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -13,6 +15,8 @@ MOUNT_ROOT = Path("/mnt/multiboot_target")
 BTRFS_OPTS = "defaults,noatime,compress=zstd:1,space_cache=v2"
 BTRFS_NOCOW_OPTS = "defaults,noatime,nodatacow"
 VIRTIO_WIN_URL = "https://fedorapeople.org"
+REFIND_VERSION = "0.14.2"
+REFIND_ZIP_URL = f"https://sourceforge.net{REFIND_VERSION}/refind-bin-{REFIND_VERSION}.zip/download"
 
 DISTROS = {
     "1": {
@@ -83,6 +87,131 @@ def run(cmd, check=True, input_text=None):
     return subprocess.run(cmd, check=check, text=True, input=input_text)
 
 
+def locate_refind_assets() -> tuple[Path | None, Path | None]:
+    """Finds refind_aa64.efi and btrfs_aa64.efi on the host live system."""
+    refind_bin = None
+    btrfs_drv = None
+    search_roots = [
+        Path("/usr/share/refind"),
+        Path("/usr/lib/refind"),
+        Path("/boot/efi/EFI/refind"),
+    ]
+    for root in search_roots:
+        for candidate in [root / "refind_aa64.efi", root / "refind" / "refind_aa64.efi"]:
+            if candidate.exists():
+                refind_bin = candidate
+                break
+        for drv in [root / "drivers_aa64" / "btrfs_aa64.efi", root / "refind" / "drivers_aa64" / "btrfs_aa64.efi"]:
+            if drv.exists():
+                btrfs_drv = drv
+                break
+        if refind_bin:
+            break
+    return refind_bin, btrfs_drv
+
+
+def stage_upstream_refind():
+    """Downloads and extracts upstream refind-bin into /usr/share/refind if missing."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = CACHE_DIR / f"refind-bin-{REFIND_VERSION}.zip"
+    extract_dir = CACHE_DIR / "refind_extracted"
+
+    if not zip_path.exists():
+        run(["curl", "-L", "--fail", "-o", str(zip_path), REFIND_ZIP_URL])
+
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
+
+    src_root = next(extract_dir.glob("refind-bin-*")) / "refind"
+    dest_root = Path("/usr/share/refind")
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    shutil.copytree(src_root, dest_root)
+
+    install_script = next(extract_dir.glob("refind-bin-*")) / "refind-install"
+    if install_script.exists():
+        shutil.copy2(install_script, "/usr/local/sbin/refind-install")
+        Path("/usr/local/sbin/refind-install").chmod(0o755)
+
+
+def preflight_check():
+    """Validates host architecture, UEFI state, and required CLI tools before touching any disk."""
+    print("\n=== Running Preflight Environment & Dependency Checks ===")
+
+    # 1. Verify ARM64 host architecture
+    arch = platform.machine().lower()
+    if arch not in ("aarch64", "arm64"):
+        sys.exit(f"Error: Detected host architecture '{arch}'. This installer targets ARM64 (aarch64).")
+
+    # 2. Verify live system is booted in UEFI mode
+    if not Path("/sys/firmware/efi").is_dir():
+        sys.exit("Error: System is not booted in UEFI mode (/sys/firmware/efi missing). Reboot in UEFI mode.")
+
+    # 3. Map required CLI binaries to Fedora / Debian package names
+    tool_packages = {
+        "parted": ("parted", "parted"),
+        "sgdisk": ("gdisk", "gdisk"),
+        "wipefs": ("util-linux", "util-linux"),
+        "blkid": ("util-linux", "util-linux"),
+        "mkfs.fat": ("dosfstools", "dosfstools"),
+        "mkfs.ext4": ("e2fsprogs", "e2fsprogs"),
+        "mkfs.btrfs": ("btrfs-progs", "btrfs-progs"),
+        "btrfs": ("btrfs-progs", "btrfs-progs"),
+        "dnf": ("dnf5", "dnf"),
+        "debootstrap": ("debootstrap", "debootstrap"),
+        "curl": ("curl", "curl"),
+        "tar": ("tar", "tar"),
+        "openssl": ("openssl", "openssl"),
+        "sbsign": ("sbsigntools", "sbsigntool"),
+        "mokutil": ("mokutil", "mokutil"),
+        "efibootmgr": ("efibootmgr", "efibootmgr"),
+    }
+
+    missing_tools = [tool for tool in tool_packages if shutil.which(tool) is None]
+    if missing_tools:
+        print(f"Missing required host tools: {', '.join(missing_tools)}")
+        ans = input("Attempt to install missing packages automatically now? [Y/n]: ").strip().lower()
+        if ans in ("", "y", "yes"):
+            if shutil.which("dnf"):
+                pkgs = sorted({tool_packages[t][0] for t in missing_tools})
+                run(["dnf", "install", "-y", *pkgs])
+            elif shutil.which("apt-get"):
+                pkgs = sorted({tool_packages[t][1] for t in missing_tools})
+                run(["apt-get", "update"])
+                run(["apt-get", "install", "-y", *pkgs])
+            else:
+                sys.exit("No supported package manager (dnf/apt-get) found to auto-install dependencies.")
+        else:
+            sys.exit("Aborted due to missing host dependencies.")
+
+    # Re-verify all binaries are present
+    still_missing = [tool for tool in tool_packages if shutil.which(tool) is None]
+    if still_missing:
+        sys.exit(f"Error: The following required tools are still missing: {', '.join(still_missing)}")
+
+    # 4. Verify btrfs-progs supports mkswapfile (btrfs-progs >= 6.1)
+    mkswap_check = subprocess.run(
+        ["btrfs", "filesystem", "mkswapfile", "--help"], capture_output=True, text=True
+    )
+    if mkswap_check.returncode != 0:
+        sys.exit("Error: Installed btrfs-progs does not support 'btrfs filesystem mkswapfile' (requires >= 6.1).")
+
+    # 5. Verify rEFInd aarch64 binary & Btrfs driver are staged on host
+    refind_bin, _ = locate_refind_assets()
+    if not refind_bin:
+        print("rEFInd ARM64 binary (refind_aa64.efi) not found on host.")
+        ans = input(f"Download and stage upstream rEFInd {REFIND_VERSION} now? [Y/n]: ").strip().lower()
+        if ans in ("", "y", "yes"):
+            stage_upstream_refind()
+            refind_bin, _ = locate_refind_assets()
+        if not refind_bin:
+            sys.exit("Error: refind_aa64.efi is required for ARM64 Secure Boot setup.")
+
+    print("[OK] Preflight checks passed: aarch64 UEFI, btrfs-progs, sbsigntools, debootstrap, dnf, and rEFInd ready.")
+
+
 @contextmanager
 def chroot_env(target: Path):
     binds = ["dev", "dev/pts", "proc", "sys", "run"]
@@ -139,147 +268,113 @@ def generate_local_mok() -> dict:
     mok_crt = MOK_DIR / "MOK.crt"
     mok_der = MOK_DIR / "MOK.der"
 
-    live_mok = Path("/etc/secureboot-mok")
-    if not mok_key.exists() and (live_mok / "MOK.key").exists():
-        shutil.copy2(live_mok / "MOK.key", mok_key)
-        shutil.copy2(live_mok / "MOK.crt", mok_crt)
-        shutil.copy2(live_mok / "MOK.der", mok_der)
-        mok_key.chmod(0o600)
-
-    if not (mok_key.exists() and mok_crt.exists() and mok_der.exists()):
-        print("\n--- Generating Local Machine Owner Key (MOK) for ARM64 Secure Boot ---")
-        run([
-            "openssl", "req", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", str(mok_key),
-            "-new", "-x509", "-sha256", "-days", "3650",
-            "-subj", "/CN=Local MultiBoot Developer MOK/",
-            "-out", str(mok_crt),
-        ])
-        run(["openssl", "x509", "-outform", "DER", "-in", str(mok_crt), "-out", str(mok_der)])
-        mok_key.chmod(0o600)
-
-    return {"key": mok_key, "crt": mok_crt, "der": mok_der}
-
-
+"""Use code with caution."""
+live_mok = Path("/etc/secureboot-mok")
+if not mok_key.exists() and (live_mok / "MOK.key").exists():
+shutil.copy2(live_mok / "MOK.key", mok_key)
+shutil.copy2(live_mok / "MOK.crt", mok_crt)
+shutil.copy2(live_mok / "MOK.der", mok_der)
+mok_key.chmod(0o600)
+if not (mok_key.exists() and mok_crt.exists() and mok_der.exists()):
+print("\n--- Generating Local Machine Owner Key (MOK) for ARM64 Secure Boot ---")
+run([
+"openssl", "req", "-newkey", "rsa:2048", "-nodes",
+"-keyout", str(mok_key),
+"-new", "-x509", "-sha256", "-days", "3650",
+"-subj", "/CN=Local MultiBoot Developer MOK/",
+"-out", str(mok_crt),
+])
+run(["openssl", "x509", "-outform", "DER", "-in", str(mok_crt), "-out", str(mok_der)])
+mok_key.chmod(0o600)
+return {"key": mok_key, "crt": mok_crt, "der": mok_der}
 def check_and_wipe_disk(disk: str):
-    if not Path(disk).is_block_device():
-        sys.exit(f"Error: {disk} is not a valid block device.")
-
-    print(f"\n--- Checking existing data on {disk} ---")
-    run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", disk], check=False)
-    sig = subprocess.run(["wipefs", disk], capture_output=True, text=True)
-    if sig.stdout.strip():
-        print(f"\nExisting filesystem/partition signatures detected:\n{sig.stdout}")
-
-    confirm = input(f"\nWARNING: All data on {disk} will be DESTROYED. Type 'WIPE {disk}' to continue: ")
-    if confirm.strip() != f"WIPE {disk}":
-        sys.exit("Aborted by user.")
-
-    run(["wipefs", "--all", "--force", disk])
-    run(["sgdisk", "--zap-all", disk])
-
-
+if not Path(disk).is_block_device():
+sys.exit(f"Error: {disk} is not a valid block device.")
+print(f"\n--- Checking existing data on {disk} ---")
+run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", disk], check=False)
+sig = subprocess.run(["wipefs", disk], capture_output=True, text=True)
+if sig.stdout.strip():
+print(f"\nExisting filesystem/partition signatures detected:\n{sig.stdout}")
+confirm = input(f"\nWARNING: All data on {disk} will be DESTROYED. Type 'WIPE {disk}' to continue: ")
+if confirm.strip() != f"WIPE {disk}":
+sys.exit("Aborted by user.")
+run(["wipefs", "--all", "--force", disk])
+run(["sgdisk", "--zap-all", disk])
 def create_partitions(disk: str):
-    print(f"\n--- Creating GPT & Partitions on {disk} ---")
-    run(["parted", "-s", disk, "mklabel", "gpt"])
-    run(["parted", "-s", disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])
-    run(["parted", "-s", disk, "set", "1", "esp", "on"])
-    run(["parted", "-s", disk, "mkpart", "FEDORA_BOOT", "ext4", "513MiB", "4609MiB"])
-    run(["parted", "-s", disk, "mkpart", "MULTIBOOT_BTRFS", "btrfs", "4609MiB", "100%"])
-    run(["partprobe", disk])
-
-    p_efi = get_part_path(disk, 1)
-    p_boot = get_part_path(disk, 2)
-    p_btrfs = get_part_path(disk, 3)
-
-    run(["mkfs.fat", "-F32", "-n", "EFI", p_efi])
-    run(["mkfs.ext4", "-F", "-L", "FEDORA_BOOT", p_boot])
-    run(["mkfs.btrfs", "-f", "-L", "MULTIBOOT_POOL", p_btrfs])
-
-    return p_efi, p_boot, p_btrfs
-
-
+print(f"\n--- Creating GPT & Partitions on {disk} ---")
+run(["parted", "-s", disk, "mklabel", "gpt"])
+run(["parted", "-s", disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])
+run(["parted", "-s", disk, "set", "1", "esp", "on"])
+run(["parted", "-s", disk, "mkpart", "FEDORA_BOOT", "ext4", "513MiB", "4609MiB"])
+run(["parted", "-s", disk, "mkpart", "MULTIBOOT_BTRFS", "btrfs", "4609MiB", "100%"])
+run(["partprobe", disk])
+p_efi = get_part_path(disk, 1)
+p_boot = get_part_path(disk, 2)
+p_btrfs = get_part_path(disk, 3)
+run(["mkfs.fat", "-F32", "-n", "EFI", p_efi])
+run(["mkfs.ext4", "-F", "-L", "FEDORA_BOOT", p_boot])
+run(["mkfs.btrfs", "-f", "-L", "MULTIBOOT_POOL", p_btrfs])
+return p_efi, p_boot, p_btrfs
 def select_distros(single_mode: bool = False):
-    print("\n--- Select Target Systems (ARM64 / aarch64) ---")
-    for key, info in DISTROS.items():
-        print(f"  [{key}] {info['name']} ({info['id']})")
-
-    if single_mode:
-        choice = input("\nEnter single system number (e.g., 6): ").strip()
-        if choice not in DISTROS:
-            sys.exit("Invalid system selection.")
-        return [DISTROS[choice]]
-
-    choices = input("\nEnter comma-separated numbers (e.g., 1,3,6): ").strip().split(",")
-    selected = [DISTROS[c.strip()] for c in choices if c.strip() in DISTROS]
-    if not selected:
-        sys.exit("No valid systems selected. Exiting.")
-    return selected
-
-
+print("\n--- Select Target Systems (ARM64 / aarch64) ---")
+for key, info in DISTROS.items():
+print(f"  [{key}] {info['name']} ({info['id']})")
+if single_mode:
+choice = input("\nEnter single system number (e.g., 6): ").strip()
+if choice not in DISTROS:
+sys.exit("Invalid system selection.")
+return [DISTROS[choice]]
+choices = input("\nEnter comma-separated numbers (e.g., 1,3,6): ").strip().split(",")
+selected = [DISTROS[c.strip()] for c in choices if c.strip() in DISTROS]
+if not selected:
+sys.exit("No valid systems selected. Exiting.")
+return selected
 def select_source_mode():
-    print("\n--- Select Installation Source ---")
-    print("  Fetch latest rootfs/packages from Internet (and cache locally)")
-    print(f"  Use local preseeded cache ({CACHE_DIR})")
-    mode = input("Choice [1/2]: ").strip()
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return "cache" if mode == "2" else "internet"
-
-
+print("\n--- Select Installation Source ---")
+print("  Fetch latest rootfs/packages from Internet (and cache locally)")
+print(f"  Use local preseeded cache ({CACHE_DIR})")
+mode = input("Choice [1/2]: ").strip()
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+return "cache" if mode == "2" else "internet"
 def ensure_shared_subvolumes(top_mnt: Path):
-    """Creates shared/@projects, shared/@containers, shared/@swap (nodatacow), and shared/@libvirt (nodatacow)."""
-    shared_dir = top_mnt / "shared"
-    shared_dir.mkdir(parents=True, exist_ok=True)
-    for sv in ["@projects", "@containers", "@swap", "@libvirt"]:
-        sv_path = shared_dir / sv
-        if not sv_path.exists():
-            run(["btrfs", "subvolume", "create", str(sv_path)])
-
-    # Disable Copy-on-Write on @swap and @libvirt for optimal NVMe VM I/O and swapfiles
-    run(["chattr", "+C", str(shared_dir / "@swap")])
-    run(["chattr", "+C", str(shared_dir / "@libvirt")])
-
-
+shared_dir = top_mnt / "shared"
+shared_dir.mkdir(parents=True, exist_ok=True)
+for sv in ["@projects", "@containers", "@swap", "@libvirt"]:
+sv_path = shared_dir / sv
+if not sv_path.exists():
+run(["btrfs", "subvolume", "create", str(sv_path)])
+run(["chattr", "+C", str(shared_dir / "@swap")])
+run(["chattr", "+C", str(shared_dir / "@libvirt")])
 def create_single_os_subvolumes(top_mnt: Path, distro: dict):
-    os_dir = top_mnt / distro["id"]
-    os_dir.mkdir(parents=True, exist_ok=True)
-
-    distro_subvols = ["@", "@home", "@snapshots", "@var_log", "@var_cache", "@var_tmp"]
-    if distro["dm_subvol"]:
-        distro_subvols.append(distro["dm_subvol"])
-
-    for sv in distro_subvols:
-        sv_path = os_dir / sv
-        if not sv_path.exists():
-            run(["btrfs", "subvolume", "create", str(sv_path)])
-
-
+os_dir = top_mnt / distro["id"]
+os_dir.mkdir(parents=True, exist_ok=True)
+distro_subvols = ["@", "@home", "@snapshots", "@var_log", "@var_cache", "@var_tmp"]
+if distro["dm_subvol"]:
+distro_subvols.append(distro["dm_subvol"])
+for sv in distro_subvols:
+sv_path = os_dir / sv
+if not sv_path.exists():
+run(["btrfs", "subvolume", "create", str(sv_path)])
 def wipe_os_folder_subvolumes(top_mnt: Path, os_id: str):
-    """Safely removes all snapshots, subvolumes, and swapfile for a single OS folder."""
-    os_dir = top_mnt / os_id
-    if os_dir.exists():
-        snap_dir = os_dir / "@snapshots"
-        if snap_dir.exists():
-            for sid_dir in sorted(snap_dir.iterdir()):
-                snap_sv = sid_dir / "snapshot"
-                if snap_sv.exists():
-                    run(["btrfs", "subvolume", "delete", str(snap_sv)], check=False)
-                if sid_dir.is_dir():
-                    shutil.rmtree(sid_dir, ignore_errors=True)
-
-        for sub in sorted(os_dir.iterdir()):
-            if sub.is_dir():
-                run(["btrfs", "subvolume", "delete", str(sub)], check=False)
-
-        os_dir.rmdir()
-
-    swapfile = top_mnt / "shared" / "@swap" / f"swapfile_{os_id}"
-    if swapfile.exists():
-        swapfile.unlink()
-
-
+os_dir = top_mnt / os_id
+if os_dir.exists():
+snap_dir = os_dir / "@snapshots"
+if snap_dir.exists():
+for sid_dir in sorted(snap_dir.iterdir()):
+snap_sv = sid_dir / "snapshot"
+if snap_sv.exists():
+run(["btrfs", "subvolume", "delete", str(snap_sv)], check=False)
+if sid_dir.is_dir():
+shutil.rmtree(sid_dir, ignore_errors=True)
+for sub in sorted(os_dir.iterdir()):
+if sub.is_dir():
+run(["btrfs", "subvolume", "delete", str(sub)], check=False)
+os_dir.rmdir()
+swapfile = top_mnt / "shared" / "@swap" / f"swapfile_{os_id}"
+if swapfile.exists():
+swapfile.unlink()
 def create_btrfs_subvolumes(p_btrfs: str, selected_distros: list):
-    top_mnt = MOUNT_ROOT / "btrfs_top"
+top_mnt = MOUNT_ROOT / "btrfs_top"
 top_mnt.mkdir(parents=True, exist_ok=True)
 run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
 ensure_shared_subvolumes(top_mnt)
@@ -473,7 +568,6 @@ sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
 sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
 sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
 sudoers_dropin.chmod(0o440)
-# Enable Display Manager and Libvirt KVM daemon
 if distro["dm"]:
 chroot_run(target, ["systemctl", "enable", distro["dm"]], check=False)
 chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
@@ -507,14 +601,15 @@ doas_conf.write_text("permit persist :wheel\n")
 modules_file = target / "etc" / "modules"
 existing_mods = modules_file.read_text() if modules_file.exists() else ""
 if "tun" not in existing_mods.splitlines():
-modules_file.write_text(existing_mods + ("tun\n" if existing_mods.endswith("\n") or not existing_mods else "\ntun\n"))
+modules_file.write_text(
+existing_mods + ("tun\n" if existing_mods.endswith("\n") or not existing_mods else "\ntun\n")
+)
 if distro["dm"]:
 chroot_run(target, ["rc-update", "add", distro["dm"], "default"], check=False)
 chroot_run(target, ["rc-update", "add", "libvirtd", "default"], check=False)
 if did == "alpine_sway":
 chroot_run(target, ["usermod", "-aG", "seat", uname], check=False)
 chroot_run(target, ["rc-update", "add", "seatd", "default"], check=False)
-# Ensure shared @projects and @libvirt directories have clean ownership/permissions
 projects_dir = target / "srv" / "projects"
 projects_dir.mkdir(parents=True, exist_ok=True)
 os.chown(projects_dir, int(uid), int(gid))
@@ -652,6 +747,7 @@ for candidate_dir in [
 efi_mnt / "EFI" / "fedora",
 efi_mnt / "EFI" / "debian",
 efi_mnt / "EFI" / "ubuntu",
+Path("/boot/efi/EFI/fedora"),
 Path("/usr/share/shim"),
 ]:
 if (candidate_dir / "shimaa64.efi").exists():
@@ -664,23 +760,17 @@ refind_dir = efi_mnt / "EFI" / "refind"
 boot_fallback_dir = efi_mnt / "EFI" / "BOOT"
 refind_dir.mkdir(parents=True, exist_ok=True)
 boot_fallback_dir.mkdir(parents=True, exist_ok=True)
-run([
-"refind-install",
-"--root", str(efi_mnt),
-"--shim", str(shim_src),
-"--localkeys",
-], check=False)
-refind_bin = None
-for p in [
-refind_dir / "refind_aa64.efi",
-refind_dir / "grubaa64.efi",
-Path("/usr/share/refind/refind_aa64.efi"),
-]:
-if p.exists():
-refind_bin = p
-break
+refind_bin, btrfs_drv_src = locate_refind_assets()
 if not refind_bin:
 sys.exit("Error: refind_aa64.efi binary not found.")
+# Copy drivers and icons if staged in /usr/share/refind
+src_refind_dir = refind_bin.parent
+if (src_refind_dir / "icons").is_dir() and not (refind_dir / "icons").exists():
+shutil.copytree(src_refind_dir / "icons", refind_dir / "icons")
+drivers_dst = refind_dir / "drivers_aa64"
+drivers_dst.mkdir(parents=True, exist_ok=True)
+if btrfs_drv_src and btrfs_drv_src.exists():
+shutil.copy2(btrfs_drv_src, drivers_dst / "btrfs_aa64.efi")
 signed_refind = refind_dir / "grubaa64.efi"
 run([
 "sbsign",
@@ -696,7 +786,7 @@ if mm_src and mm_src.exists():
 shutil.copy2(mm_src, refind_dir / "mmaa64.efi")
 shutil.copy2(mm_src, boot_fallback_dir / "mmaa64.efi")
 shutil.copy2(mok["der"], efi_mnt / "MOK.der")
-btrfs_drv = refind_dir / "drivers_aa64" / "btrfs_aa64.efi"
+btrfs_drv = drivers_dst / "btrfs_aa64.efi"
 if btrfs_drv.exists():
 run([
 "sbsign",
@@ -761,7 +851,8 @@ run(["umount", str(efi_mnt)])
 def main():
 if os.geteuid() != 0:
 sys.exit("Run this installer as root.")
-disk = input("Enter target block device (e.g., /dev/nvme0n1 or /dev/sda): ").strip()
+preflight_check()
+disk = input("\nEnter target block device (e.g., /dev/nvme0n1 or /dev/sda): ").strip()
 check_and_wipe_disk(disk)
 selected_distros = select_distros(single_mode=False)
 source_mode = select_source_mode()
