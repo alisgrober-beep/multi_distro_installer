@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+import getpass
 import os
 import platform
 import shutil
 import subprocess
 import sys
-import getpass
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -82,26 +82,62 @@ DISTROS = {
 }
 
 
-def run(cmd, check=True, input_text=None):
+def get_arch_spec() -> dict[str, str]:
+    """Returns architecture-specific naming across Fedora, Debian, Alpine, UEFI, and QEMU."""
+    raw = platform.machine().lower()
+    if raw in ("aarch64", "arm64"):
+        return {
+            "family": "arm64",
+            "fedora_arch": "aarch64",
+            "debian_arch": "arm64",
+            "alpine_arch": "aarch64",
+            "efi_suffix": "aa64",
+            "qemu_system": "qemu-system-aarch64",
+            "debian_qemu_pkg": "qemu-system-arm",
+            "debian_efi_pkg": "qemu-efi-aarch64",
+            "fedora_efi_pkg": "edk2-aarch64",
+        }
+    if raw in ("x86_64", "amd64"):
+        return {
+            "family": "amd64",
+            "fedora_arch": "x86_64",
+            "debian_arch": "amd64",
+            "alpine_arch": "x86_64",
+            "efi_suffix": "x64",
+            "qemu_system": "qemu-system-x86_64",
+            "debian_qemu_pkg": "qemu-system-x86",
+            "debian_efi_pkg": "ovmf",
+            "fedora_efi_pkg": "edk2-ovmf",
+        }
+    sys.exit(f"Error: Unsupported CPU architecture '{raw}'. Supported: arm64/aarch64, amd64/x86_64.")
+
+
+def run(cmd: list, check: bool = True, input_text: str | None = None):
     print(f"[EXEC] {' '.join(map(str, cmd))}")
     return subprocess.run(cmd, check=check, text=True, input=input_text)
 
 
 def locate_refind_assets() -> tuple[Path | None, Path | None]:
-    """Finds refind_aa64.efi and btrfs_aa64.efi on the host live system."""
-    refind_bin = None
-    btrfs_drv = None
+    """Finds refind_<arch>.efi and btrfs_<arch>.efi on the host live system."""
+    arch = get_arch_spec()
+    sfx = arch["efi_suffix"]
+    refind_bin: Path | None = None
+    btrfs_drv: Path | None = None
+
     search_roots = [
         Path("/usr/share/refind"),
         Path("/usr/lib/refind"),
         Path("/boot/efi/EFI/refind"),
     ]
     for root in search_roots:
-        for candidate in [root / "refind_aa64.efi", root / "refind" / "refind_aa64.efi"]:
+        for candidate in [root / f"refind_{sfx}.efi", root / "refind" / f"refind_{sfx}.efi"]:
             if candidate.exists():
                 refind_bin = candidate
                 break
-        for drv in [root / "drivers_aa64" / "btrfs_aa64.efi", root / "refind" / "drivers_aa64" / "btrfs_aa64.efi"]:
+        for drv in [
+            root / f"drivers_{sfx}" / f"btrfs_{sfx}.efi",
+            root / "refind" / f"drivers_{sfx}" / f"btrfs_{sfx}.efi",
+        ]:
             if drv.exists():
                 btrfs_drv = drv
                 break
@@ -130,26 +166,15 @@ def stage_upstream_refind():
         shutil.rmtree(dest_root)
     shutil.copytree(src_root, dest_root)
 
-    install_script = next(extract_dir.glob("refind-bin-*")) / "refind-install"
-    if install_script.exists():
-        shutil.copy2(install_script, "/usr/local/sbin/refind-install")
-        Path("/usr/local/sbin/refind-install").chmod(0o755)
-
 
 def preflight_check():
     """Validates host architecture, UEFI state, and required CLI tools before touching any disk."""
-    print("\n=== Running Preflight Environment & Dependency Checks ===")
+    arch = get_arch_spec()
+    print(f"\n=== Running Preflight Environment Checks ({arch['family']} / {arch['fedora_arch']}) ===")
 
-    # 1. Verify ARM64 host architecture
-    arch = platform.machine().lower()
-    if arch not in ("aarch64", "arm64"):
-        sys.exit(f"Error: Detected host architecture '{arch}'. This installer targets ARM64 (aarch64).")
-
-    # 2. Verify live system is booted in UEFI mode
     if not Path("/sys/firmware/efi").is_dir():
         sys.exit("Error: System is not booted in UEFI mode (/sys/firmware/efi missing). Reboot in UEFI mode.")
 
-    # 3. Map required CLI binaries to Fedora / Debian package names
     tool_packages = {
         "parted": ("parted", "parted"),
         "sgdisk": ("gdisk", "gdisk"),
@@ -186,30 +211,27 @@ def preflight_check():
         else:
             sys.exit("Aborted due to missing host dependencies.")
 
-    # Re-verify all binaries are present
     still_missing = [tool for tool in tool_packages if shutil.which(tool) is None]
     if still_missing:
         sys.exit(f"Error: The following required tools are still missing: {', '.join(still_missing)}")
 
-    # 4. Verify btrfs-progs supports mkswapfile (btrfs-progs >= 6.1)
     mkswap_check = subprocess.run(
         ["btrfs", "filesystem", "mkswapfile", "--help"], capture_output=True, text=True
     )
     if mkswap_check.returncode != 0:
         sys.exit("Error: Installed btrfs-progs does not support 'btrfs filesystem mkswapfile' (requires >= 6.1).")
 
-    # 5. Verify rEFInd aarch64 binary & Btrfs driver are staged on host
     refind_bin, _ = locate_refind_assets()
     if not refind_bin:
-        print("rEFInd ARM64 binary (refind_aa64.efi) not found on host.")
+        print(f"rEFInd binary (refind_{arch['efi_suffix']}.efi) not found on host.")
         ans = input(f"Download and stage upstream rEFInd {REFIND_VERSION} now? [Y/n]: ").strip().lower()
         if ans in ("", "y", "yes"):
             stage_upstream_refind()
             refind_bin, _ = locate_refind_assets()
         if not refind_bin:
-            sys.exit("Error: refind_aa64.efi is required for ARM64 Secure Boot setup.")
+            sys.exit(f"Error: refind_{arch['efi_suffix']}.efi is required for UEFI Secure Boot setup.")
 
-    print("[OK] Preflight checks passed: aarch64 UEFI, btrfs-progs, sbsigntools, debootstrap, dnf, and rEFInd ready.")
+    print(f"[OK] Preflight checks passed for {arch['family']} UEFI environment.")
 
 
 @contextmanager
@@ -232,7 +254,7 @@ def chroot_env(target: Path):
             run(["umount", "-l", str(dst)], check=False)
 
 
-def chroot_run(target: Path, cmd: list, input_text=None, check=True):
+def chroot_run(target: Path, cmd: list, input_text: str | None = None, check: bool = True):
     return run(["chroot", str(target), *map(str, cmd)], check=check, input_text=input_text)
 
 
@@ -252,23 +274,18 @@ def prompt_user_config(include_mok_note: bool = True) -> dict:
         print("Invalid username. Use lowercase letters and numbers only.")
 
     while True:
-        pw1 = getpass.getpass(f"Enter password for '{username}' (applied to user & root): ")
-        pw2 = getpass.getpass("Confirm password: ")
-        if pw1 and pw1 == pw2:
-            break
-        print("Passwords did not match or were empty. Try again.")
-
-    return {"username": username, "password": pw1, "uid": 1000, "gid": 1000}
-
-
-def generate_local_mok() -> dict:
-    """Loads existing MOK from cache or running OS (/etc/secureboot-mok), or generates a new one."""
-    MOK_DIR.mkdir(parents=True, exist_ok=True)
-    mok_key = MOK_DIR / "MOK.key"
-    mok_crt = MOK_DIR / "MOK.crt"
-    mok_der = MOK_DIR / "MOK.der"
-
-"""Use code with caution."""
+pw1 = getpass.getpass(f"Enter password for '{username}' (applied to user & root): ")
+pw2 = getpass.getpass("Confirm password: ")
+if pw1 and pw1 == pw2:
+break
+print("Passwords did not match or were empty. Try again.")
+return {"username": username, "password": pw1, "uid": 1000, "gid": 1000}
+def generate_local_mok() -> dict[str, Path]:
+"""Loads existing MOK from cache or running OS (/etc/secureboot-mok), or generates a new one."""
+MOK_DIR.mkdir(parents=True, exist_ok=True)
+mok_key = MOK_DIR / "MOK.key"
+mok_crt = MOK_DIR / "MOK.crt"
+mok_der = MOK_DIR / "MOK.der"
 live_mok = Path("/etc/secureboot-mok")
 if not mok_key.exists() and (live_mok / "MOK.key").exists():
 shutil.copy2(live_mok / "MOK.key", mok_key)
@@ -276,7 +293,7 @@ shutil.copy2(live_mok / "MOK.crt", mok_crt)
 shutil.copy2(live_mok / "MOK.der", mok_der)
 mok_key.chmod(0o600)
 if not (mok_key.exists() and mok_crt.exists() and mok_der.exists()):
-print("\n--- Generating Local Machine Owner Key (MOK) for ARM64 Secure Boot ---")
+print("\n--- Generating Local Machine Owner Key (MOK) for UEFI Secure Boot ---")
 run([
 "openssl", "req", "-newkey", "rsa:2048", "-nodes",
 "-keyout", str(mok_key),
@@ -300,7 +317,7 @@ if confirm.strip() != f"WIPE {disk}":
 sys.exit("Aborted by user.")
 run(["wipefs", "--all", "--force", disk])
 run(["sgdisk", "--zap-all", disk])
-def create_partitions(disk: str):
+def create_partitions(disk: str) -> tuple[str, str, str]:
 print(f"\n--- Creating GPT & Partitions on {disk} ---")
 run(["parted", "-s", disk, "mklabel", "gpt"])
 run(["parted", "-s", disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])
@@ -315,8 +332,9 @@ run(["mkfs.fat", "-F32", "-n", "EFI", p_efi])
 run(["mkfs.ext4", "-F", "-L", "FEDORA_BOOT", p_boot])
 run(["mkfs.btrfs", "-f", "-L", "MULTIBOOT_POOL", p_btrfs])
 return p_efi, p_boot, p_btrfs
-def select_distros(single_mode: bool = False):
-print("\n--- Select Target Systems (ARM64 / aarch64) ---")
+def select_distros(single_mode: bool = False) -> list[dict]:
+arch = get_arch_spec()
+print(f"\n--- Select Target Systems ({arch['family']} / {arch['fedora_arch']}) ---")
 for key, info in DISTROS.items():
 print(f"  [{key}] {info['name']} ({info['id']})")
 if single_mode:
@@ -329,7 +347,7 @@ selected = [DISTROS[c.strip()] for c in choices if c.strip() in DISTROS]
 if not selected:
 sys.exit("No valid systems selected. Exiting.")
 return selected
-def select_source_mode():
+def select_source_mode() -> str:
 print("\n--- Select Installation Source ---")
 print("  Fetch latest rootfs/packages from Internet (and cache locally)")
 print(f"  Use local preseeded cache ({CACHE_DIR})")
@@ -373,7 +391,7 @@ os_dir.rmdir()
 swapfile = top_mnt / "shared" / "@swap" / f"swapfile_{os_id}"
 if swapfile.exists():
 swapfile.unlink()
-def create_btrfs_subvolumes(p_btrfs: str, selected_distros: list):
+def create_btrfs_subvolumes(p_btrfs: str, selected_distros: list[dict]):
 top_mnt = MOUNT_ROOT / "btrfs_top"
 top_mnt.mkdir(parents=True, exist_ok=True)
 run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
@@ -387,7 +405,6 @@ if not swap_file.exists():
 print(f"Creating {size_gb}G Btrfs swapfile for {distro_id}...")
 run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
 def provision_virtio_win_iso(target_root: Path, source_mode: str):
-"""Stages virtio-win.iso into shared/@libvirt (/var/lib/libvirt/images) for Windows ARM64 VMs."""
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 cached_iso = CACHE_DIR / "virtio-win.iso"
 libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
@@ -396,7 +413,7 @@ target_iso = libvirt_images / "virtio-win.iso"
 if target_iso.exists():
 return
 if not cached_iso.exists() and source_mode == "internet":
-print("--- Downloading virtio-win.iso for Windows ARM64 KVM Guest Drivers ---")
+print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
 run(["curl", "-L", "--fail", "-o", str(cached_iso), VIRTIO_WIN_URL], check=False)
 if cached_iso.exists():
 shutil.copy2(cached_iso, target_iso)
@@ -426,7 +443,7 @@ lines.append(
 f"UUID={uuid_btrfs}  {distro['dm_mount']}  btrfs  subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}  0 0"
 )
 if distro["type"] == "fedora":
-lines.append(f"UUID={uuid_boot}   /boot                    ext4   defaults  0 2")
+lines.append(f"UUID={uuid_boot}   /boot                ext4   defaults  0 2")
 fstab_path = target_root / "etc" / "fstab"
 fstab_path.parent.mkdir(parents=True, exist_ok=True)
 fstab_path.write_text("\n".join(lines) + "\n")
@@ -493,7 +510,7 @@ target,
 "--description", f"Baseline clean install ({distro['name']})",
 ],
 )
-def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict):
+def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict[str, Path]):
 dtype = distro["type"]
 print(f"--- Configuring Secure Boot Module & Kernel Signing for {distro['name']} ---")
 sys_mok_dir = target / "etc" / "secureboot-mok"
@@ -542,7 +559,7 @@ hook_script.write_text(
 "fi\n"
 )
 hook_script.chmod(0o755)
-def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: dict, mok: dict):
+def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: dict, mok: dict[str, Path]):
 did = distro["id"]
 dtype = distro["type"]
 uname = user_cfg["username"]
@@ -597,7 +614,6 @@ sudoers_dropin.chmod(0o440)
 doas_conf = target / "etc" / "doas.d" / "doas.conf"
 doas_conf.parent.mkdir(parents=True, exist_ok=True)
 doas_conf.write_text("permit persist :wheel\n")
-# Ensure tun kernel module loads at boot for libvirt NAT/bridged networking
 modules_file = target / "etc" / "modules"
 existing_mods = modules_file.read_text() if modules_file.exists() else ""
 if "tun" not in existing_mods.splitlines():
@@ -623,8 +639,10 @@ os.lchown(user_proj_link, int(uid), int(gid))
 configure_snapper_baseline(target, p_btrfs, distro, user_cfg)
 configure_secure_boot_module_signing(target, distro, mok)
 def bootstrap_distro(
-p_efi: str, p_boot: str, p_btrfs: str, distro: dict, source_mode: str, user_cfg: dict, mok: dict
+p_efi: str, p_boot: str, p_btrfs: str, distro: dict, source_mode: str, user_cfg: dict, mok: dict[str, Path]
 ) -> dict:
+arch = get_arch_spec()
+sfx = arch["efi_suffix"]
 did = distro["id"]
 target = MOUNT_ROOT / did
 target.mkdir(parents=True, exist_ok=True)
@@ -653,24 +671,24 @@ run(["mount", p_boot, str(target / "boot")])
 run(["mount", p_efi, str(target / "boot" / "efi")])
 create_distro_swapfile(target, did, distro["swap_gb"])
 provision_virtio_win_iso(target, source_mode)
-print(f"\n=== Bootstrapping {distro['name']} (aarch64 + ARM64 KVM/AAVMF/swtpm / {source_mode}) ===")
+print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
 if distro["type"] == "fedora":
-cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora"]
+cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora_{arch['fedora_arch']}"]
 cmd = [
-"dnf", "-y", f"--installroot={target}", "--forcearch=aarch64", "--releasever=41",
-"install", "@core", "@virtualization", "edk2-aarch64", "swtpm", "swtpm-tools",
+"dnf", "-y", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}", "--releasever=41",
+"install", "@core", "@virtualization", arch["fedora_efi_pkg"], "swtpm", "swtpm-tools",
 "kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
 "sudo", "akmods", "kmodtool", "openssl", "mokutil",
-"shim-aa64", "grub2-efi-aa64", distro["desktop"],
+f"shim-{sfx}", f"grub2-efi-{sfx}", distro["desktop"],
 ] + cache_arg
 if source_mode == "cache":
 cmd.append("--cacheonly")
 run(cmd)
 elif distro["type"] == "debian":
-deb_cache = CACHE_DIR / "debian"
+deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
 deb_cache.mkdir(parents=True, exist_ok=True)
 run([
-"debootstrap", "--arch=arm64", f"--cache-dir={deb_cache}",
+"debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
 "bookworm", str(target), "debian.org",
 ])
 with chroot_env(target):
@@ -679,17 +697,19 @@ chroot_run(
 target,
 [
 "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
-"linux-image-arm64", "btrfs-progs", "snapper", "sudo",
-"qemu-system-arm", "libvirt-daemon-system", "libvirt-clients",
-"qemu-efi-aarch64", "swtpm", "swtpm-tools", "virt-manager",
-"dkms", "linux-headers-arm64", "shim-signed", "grub-efi-arm64-signed",
+f"linux-image-{arch['debian_arch']}", "btrfs-progs", "snapper", "sudo",
+arch["debian_qemu_pkg"], "libvirt-daemon-system", "libvirt-clients",
+arch["debian_efi_pkg"], "swtpm", "swtpm-tools", "virt-manager",
+"dkms", f"linux-headers-{arch['debian_arch']}", "shim-signed",
+f"grub-efi-{arch['debian_arch']}-signed",
 "mokutil", "sbsigntool", distro["desktop"],
 ],
 )
 elif distro["type"] == "alpine":
-alpine_tar = CACHE_DIR / "alpine-minirootfs-aarch64.tar.gz"
+a_arch = arch["alpine_arch"]
+alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
 if source_mode == "internet" or not alpine_tar.exists():
-url = "alpinelinux.org"
+url = f"alpinelinux.org{a_arch}/alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
 run(["curl", "-L", "-o", str(alpine_tar), url])
 run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
 shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
@@ -699,8 +719,8 @@ target,
 [
 "/sbin/apk", "add", "--no-cache",
 "alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
-"qemu-system-aarch64", "qemu-img", "libvirt-daemon", "libvirt-client",
-"edk2-aarch64", "swtpm", "virt-install",
+arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
+arch["fedora_efi_pkg"], "swtpm", "virt-install",
 *distro["desktop"].split(),
 ],
 )
@@ -733,16 +753,22 @@ return {
 "initrd": initrd_file,
 }
 def setup_refind_and_shim(
-disk: str, p_efi: str, p_boot: str, p_btrfs: str, boot_entries: list, mok: dict, user_cfg: dict
+disk: str, p_efi: str, p_boot: str, p_btrfs: str, boot_entries: list[dict], mok: dict[str, Path], user_cfg: dict
 ):
-print("\n=== Installing Official ARM64 Shim + MOK-Signed rEFInd Bootloader ===")
+arch = get_arch_spec()
+sfx = arch["efi_suffix"]
+print(f"\n=== Installing Official {arch['family']} Shim + MOK-Signed rEFInd Bootloader ===")
 efi_mnt = MOUNT_ROOT / "efi_setup"
 efi_mnt.mkdir(parents=True, exist_ok=True)
 run(["mount", p_efi, str(efi_mnt)])
 uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
 uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
-shim_src = None
-mm_src = None
+shim_name = f"shim{sfx}.efi"
+mm_name = f"mm{sfx}.efi"
+grub_name = f"grub{sfx}.efi"
+boot_fallback_name = f"boot{sfx}.efi"
+shim_src: Path | None = None
+mm_src: Path | None = None
 for candidate_dir in [
 efi_mnt / "EFI" / "fedora",
 efi_mnt / "EFI" / "debian",
@@ -750,28 +776,27 @@ efi_mnt / "EFI" / "ubuntu",
 Path("/boot/efi/EFI/fedora"),
 Path("/usr/share/shim"),
 ]:
-if (candidate_dir / "shimaa64.efi").exists():
-shim_src = candidate_dir / "shimaa64.efi"
-mm_src = candidate_dir / "mmaa64.efi"
+if (candidate_dir / shim_name).exists():
+shim_src = candidate_dir / shim_name
+mm_src = candidate_dir / mm_name
 break
 if not shim_src:
-sys.exit("Error: Official Microsoft-CA signed shimaa64.efi not found on EFI partition.")
+sys.exit(f"Error: Official Microsoft-CA signed {shim_name} not found on EFI partition.")
 refind_dir = efi_mnt / "EFI" / "refind"
 boot_fallback_dir = efi_mnt / "EFI" / "BOOT"
 refind_dir.mkdir(parents=True, exist_ok=True)
 boot_fallback_dir.mkdir(parents=True, exist_ok=True)
 refind_bin, btrfs_drv_src = locate_refind_assets()
 if not refind_bin:
-sys.exit("Error: refind_aa64.efi binary not found.")
-# Copy drivers and icons if staged in /usr/share/refind
+sys.exit(f"Error: refind_{sfx}.efi binary not found.")
 src_refind_dir = refind_bin.parent
 if (src_refind_dir / "icons").is_dir() and not (refind_dir / "icons").exists():
 shutil.copytree(src_refind_dir / "icons", refind_dir / "icons")
-drivers_dst = refind_dir / "drivers_aa64"
+drivers_dst = refind_dir / f"drivers_{sfx}"
 drivers_dst.mkdir(parents=True, exist_ok=True)
 if btrfs_drv_src and btrfs_drv_src.exists():
-shutil.copy2(btrfs_drv_src, drivers_dst / "btrfs_aa64.efi")
-signed_refind = refind_dir / "grubaa64.efi"
+shutil.copy2(btrfs_drv_src, drivers_dst / f"btrfs_{sfx}.efi")
+signed_refind = refind_dir / grub_name
 run([
 "sbsign",
 "--key", str(mok["key"]),
@@ -779,14 +804,14 @@ run([
 "--output", str(signed_refind),
 str(refind_bin),
 ])
-shutil.copy2(shim_src, refind_dir / "shimaa64.efi")
-shutil.copy2(shim_src, boot_fallback_dir / "bootaa64.efi")
-shutil.copy2(signed_refind, boot_fallback_dir / "grubaa64.efi")
+shutil.copy2(shim_src, refind_dir / shim_name)
+shutil.copy2(shim_src, boot_fallback_dir / boot_fallback_name)
+shutil.copy2(signed_refind, boot_fallback_dir / grub_name)
 if mm_src and mm_src.exists():
-shutil.copy2(mm_src, refind_dir / "mmaa64.efi")
-shutil.copy2(mm_src, boot_fallback_dir / "mmaa64.efi")
+shutil.copy2(mm_src, refind_dir / mm_name)
+shutil.copy2(mm_src, boot_fallback_dir / mm_name)
 shutil.copy2(mok["der"], efi_mnt / "MOK.der")
-btrfs_drv = drivers_dst / "btrfs_aa64.efi"
+btrfs_drv = drivers_dst / f"btrfs_{sfx}.efi"
 if btrfs_drv.exists():
 run([
 "sbsign",
@@ -796,7 +821,7 @@ run([
 str(btrfs_drv),
 ])
 stanzas = [
-"# Generated by Multi-Distro ARM64 Secure Boot Installer",
+f"# Generated by Multi-Distro {arch['family']} Secure Boot Installer",
 "timeout 10",
 "use_nvram false",
 "scanfor manual,external",
@@ -844,8 +869,8 @@ run([
 "efibootmgr", "--create",
 "--disk", disk,
 "--part", "1",
-"--label", "rEFInd Secure Boot (ARM64)",
-"--loader", r"\EFI\refind\shimaa64.efi",
+"--label", f"rEFInd Secure Boot ({arch['family']})",
+"--loader", f"\EFI\refind\{shim_name}",
 ], check=False)
 run(["umount", str(efi_mnt)])
 def main():
