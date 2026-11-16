@@ -607,337 +607,382 @@ def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict[s
         )
         hook_script.chmod(0o755)
 def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: dict, mok: dict[str, Path]):
-did = distro["id"]
-dtype = distro["type"]
-uname = user_cfg["username"]
-passwd = user_cfg["password"]
-uid = str(user_cfg["uid"])
-gid = str(user_cfg["gid"])
-hostname = f"dev-{did.replace('_', '-')}"
-print(f"\n--- Configuring Post-Chroot User, KVM/Libvirt & Services for {distro['name']} ---")
-(target / "etc" / "hostname").write_text(f"{hostname}\n")
-with chroot_env(target):
-if dtype in ("fedora", "debian"):
-admin_group = "wheel" if dtype == "fedora" else "sudo"
-chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
-chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
-chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
-chroot_run(
-target,
-["useradd", "-m", "-u", uid, "-g", gid, "-G", f"{admin_group},libvirt,kvm", "-s", "/bin/bash", uname],
-check=False,
-)
-chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
-sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
-sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
-sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
-sudoers_dropin.chmod(0o440)
-if distro["dm"]:
-chroot_run(target, ["systemctl", "enable", distro["dm"]], check=False)
-chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
-if dtype == "fedora":
-(target / ".autorelabel").touch()
-elif dtype == "alpine":
-chroot_run(
-target,
-["/sbin/apk", "add", "--no-cache", "shadow", "sudo", "doas", "bash", "sbsigntool"],
-)
-chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
-chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
-chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
-chroot_run(
-target,
-[
-"useradd", "-m", "-u", uid, "-g", gid,
-"-G", "wheel,video,input,audio,libvirt,kvm", "-s", "/bin/bash", uname,
-],
-check=False,
-)
-chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
-sudoers_dropin = target / "etc" / "sudoers.d" / "10-wheel"
-sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
-sudoers_dropin.write_text("%wheel ALL=(ALL:ALL) ALL\n")
-sudoers_dropin.chmod(0o440)
-doas_conf = target / "etc" / "doas.d" / "doas.conf"
-doas_conf.parent.mkdir(parents=True, exist_ok=True)
-doas_conf.write_text("permit persist :wheel\n")
-modules_file = target / "etc" / "modules"
-existing_mods = modules_file.read_text() if modules_file.exists() else ""
-if "tun" not in existing_mods.splitlines():
-modules_file.write_text(
-existing_mods + ("tun\n" if existing_mods.endswith("\n") or not existing_mods else "\ntun\n")
-)
-if distro["dm"]:
-chroot_run(target, ["rc-update", "add", distro["dm"], "default"], check=False)
-chroot_run(target, ["rc-update", "add", "libvirtd", "default"], check=False)
-if did == "alpine_sway":
-chroot_run(target, ["usermod", "-aG", "seat", uname], check=False)
-chroot_run(target, ["rc-update", "add", "seatd", "default"], check=False)
-projects_dir = target / "srv" / "projects"
-projects_dir.mkdir(parents=True, exist_ok=True)
-os.chown(projects_dir, int(uid), int(gid))
-libvirt_dir = target / "var" / "lib" / "libvirt" / "images"
-libvirt_dir.mkdir(parents=True, exist_ok=True)
-libvirt_dir.chmod(0o775)
-user_proj_link = target / "home" / uname / "Projects"
-if not user_proj_link.exists():
-os.symlink("/srv/projects", user_proj_link)
-os.lchown(user_proj_link, int(uid), int(gid))
-configure_snapper_baseline(target, p_btrfs, distro, user_cfg)
-configure_secure_boot_module_signing(target, distro, mok)
+    did = distro["id"]
+    dtype = distro["type"]
+    uname = user_cfg["username"]
+    passwd = user_cfg["password"]
+    uid = str(user_cfg["uid"])
+    gid = str(user_cfg["gid"])
+    hostname = f"dev-{did.replace('_', '-')}"
+    print(f"\n--- Configuring Post-Chroot User, KVM/Libvirt & Services for {distro['name']} ---")
+    (target / "etc" / "hostname").write_text(f"{hostname}\n")
+
+    with chroot_env(target):
+        if dtype in ("fedora", "debian"):
+            admin_group = "wheel" if dtype == "fedora" else "sudo"
+            chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
+            chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
+            chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
+            chroot_run(
+                target,
+                ["useradd", "-m", "-u", uid, "-g", gid, "-G", f"{admin_group},libvirt,kvm", "-s", "/bin/bash", uname],
+                check=False,
+            )
+            chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
+            sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
+            sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
+            sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
+            sudoers_dropin.chmod(0o440)
+            if distro["dm"]:
+                chroot_run(target, ["systemctl", "enable", distro["dm"]], check=False)
+                chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
+            if dtype == "fedora":
+                (target / ".autorelabel").touch()
+
+        elif dtype == "alpine":
+            chroot_run(
+                target,
+                ["/sbin/apk", "add", "--no-cache", "shadow", "sudo", "doas", "bash", "sbsigntool"],
+            )
+            chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
+            chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
+            chroot_run(target, ["groupadd", "-f", "kvm"], check=False)
+            chroot_run(
+                target,
+                [
+                    "useradd", "-m", "-u", uid, "-g", gid,
+                    "-G", "wheel,video,input,audio,libvirt,kvm", "-s", "/bin/bash", uname,
+                ],
+                check=False,
+            )
+            chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
+            sudoers_dropin = target / "etc" / "sudoers.d" / "10-wheel"
+            sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
+            sudoers_dropin.write_text("%wheel ALL=(ALL:ALL) ALL\n")
+            sudoers_dropin.chmod(0o440)
+            doas_conf = target / "etc" / "doas.d" / "doas.conf"
+            doas_conf.parent.mkdir(parents=True, exist_ok=True)
+            doas_conf.write_text("permit persist :wheel\n")
+            modules_file = target / "etc" / "modules"
+            existing_mods = modules_file.read_text() if modules_file.exists() else ""
+            if "tun" not in existing_mods.splitlines():
+                modules_file.write_text(
+                    existing_mods + ("tun\n" if existing_mods.endswith("\n") or not existing_mods else "\ntun\n")
+                )
+            if distro["dm"]:
+                chroot_run(target, ["rc-update", "add", distro["dm"], "default"], check=False)
+                chroot_run(target, ["rc-update", "add", "libvirtd", "default"], check=False)
+            if did == "alpine_sway":
+                chroot_run(target, ["usermod", "-aG", "seat", uname], check=False)
+                chroot_run(target, ["rc-update", "add", "seatd", "default"], check=False)
+
+    projects_dir = target / "srv" / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(projects_dir, int(uid), int(gid))
+    libvirt_dir = target / "var" / "lib" / "libvirt" / "images"
+    libvirt_dir.mkdir(parents=True, exist_ok=True)
+    libvirt_dir.chmod(0o775)
+    user_proj_link = target / "home" / uname / "Projects"
+    if not user_proj_link.exists():
+        os.symlink("/srv/projects", user_proj_link)
+    os.lchown(user_proj_link, int(uid), int(gid))
+
+    configure_snapper_baseline(target, p_btrfs, distro, user_cfg)
+    configure_secure_boot_module_signing(target, distro, mok)
+
+
 def bootstrap_distro(
-p_efi: str, p_boot: str, p_btrfs: str, distro: dict, source_mode: str, user_cfg: dict, mok: dict[str, Path]
+    p_efi: str,
+    p_boot: str,
+    p_btrfs: str,
+    distro: dict,
+    source_mode: str,
+    user_cfg: dict,
+    mok: dict[str, Path],
 ) -> dict:
-arch = get_arch_spec()
-sfx = arch["efi_suffix"]
-did = distro["id"]
-target = MOUNT_ROOT / did
-target.mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", f"subvol={did}/@,{BTRFS_OPTS}", p_btrfs, str(target)])
-for mnt, sv_path, opts in [
-("home", f"{did}/@home", BTRFS_OPTS),
-(".snapshots", f"{did}/@snapshots", BTRFS_OPTS),
-("var/log", f"{did}/@var_log", BTRFS_OPTS),
-("var/cache", f"{did}/@var_cache", BTRFS_OPTS),
-("var/tmp", f"{did}/@var_tmp", BTRFS_OPTS),
-("srv/projects", "shared/@projects", BTRFS_OPTS),
-("var/lib/containers", "shared/@containers", BTRFS_OPTS),
-("var/lib/libvirt/images", "shared/@libvirt", BTRFS_NOCOW_OPTS),
-("swap", "shared/@swap", BTRFS_NOCOW_OPTS),
-]:
-(target / mnt).mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", f"subvol={sv_path},{opts}", p_btrfs, str(target / mnt)])
-if distro["dm_subvol"]:
-dm_path = target / distro["dm_mount"].lstrip("/")
-dm_path.mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", f"subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}", p_btrfs, str(dm_path)])
-if distro["type"] == "fedora":
-(target / "boot").mkdir(parents=True, exist_ok=True)
-run(["mount", p_boot, str(target / "boot")])
-(target / "boot" / "efi").mkdir(parents=True, exist_ok=True)
-run(["mount", p_efi, str(target / "boot" / "efi")])
-create_distro_swapfile(target, did, distro["swap_gb"])
-provision_virtio_win_iso(target, source_mode)
-print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
-if distro["type"] == "fedora":
-cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora_{arch['fedora_arch']}"]
-cmd = [
-"dnf", "-y", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}", "--releasever=41",
-"install", "@core", "@virtualization", arch["fedora_efi_pkg"], "swtpm", "swtpm-tools",
-"kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
-"sudo", "akmods", "kmodtool", "openssl", "mokutil",
-f"shim-{sfx}", f"grub2-efi-{sfx}", distro["desktop"],
-] + cache_arg
-if source_mode == "cache":
-cmd.append("--cacheonly")
-run(cmd)
-elif distro["type"] == "debian":
-deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
-deb_cache.mkdir(parents=True, exist_ok=True)
-run([
-"debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
-"bookworm", str(target), "debian.org",
-])
-with chroot_env(target):
-chroot_run(target, ["apt-get", "update"])
-chroot_run(
-target,
-[
-"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
-f"linux-image-{arch['debian_arch']}", "btrfs-progs", "snapper", "sudo",
-arch["debian_qemu_pkg"], "libvirt-daemon-system", "libvirt-clients",
-arch["debian_efi_pkg"], "swtpm", "swtpm-tools", "virt-manager",
-"dkms", f"linux-headers-{arch['debian_arch']}", "shim-signed",
-f"grub-efi-{arch['debian_arch']}-signed",
-"mokutil", "sbsigntool", distro["desktop"],
-],
-)
-elif distro["type"] == "alpine":
-a_arch = arch["alpine_arch"]
-alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
-if source_mode == "internet" or not alpine_tar.exists():
-url = f"alpinelinux.org{a_arch}/alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
-run(["curl", "-L", "-o", str(alpine_tar), url])
-run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
-shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
-with chroot_env(target):
-chroot_run(
-target,
-[
-"/sbin/apk", "add", "--no-cache",
-"alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
-arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
-arch["fedora_efi_pkg"], "swtpm", "virt-install",
-*distro["desktop"].split(),
-],
-)
-generate_fstab(target, p_efi, p_boot, p_btrfs, distro)
-configure_post_chroot(target, p_btrfs, distro, user_cfg, mok)
-boot_dir = target / "boot"
-kernel_file = ""
-initrd_file = ""
-if distro["type"] == "fedora":
-kernels = sorted(boot_dir.glob("vmlinuz-"))
-initrds = sorted(boot_dir.glob("initramfs-.img"))
-if kernels:
-kernel_file = f"/{kernels[-1].name}"
-if initrds:
-initrd_file = f"/{initrds[-1].name}"
-elif distro["type"] == "debian":
-kernels = sorted(boot_dir.glob("vmlinuz-"))
-initrds = sorted(boot_dir.glob("initrd.img-"))
-if kernels:
-kernel_file = f"/{did}/@/boot/{kernels[-1].name}"
-if initrds:
-initrd_file = f"/{did}/@/boot/{initrds[-1].name}"
-elif distro["type"] == "alpine":
-kernel_file = f"/{did}/@/boot/vmlinuz-lts"
-initrd_file = f"/{did}/@/boot/initramfs-lts"
-run(["umount", "-R", str(target)])
-return {
-"distro": distro,
-"kernel": kernel_file,
-"initrd": initrd_file,
-}
+    arch = get_arch_spec()
+    sfx = arch["efi_suffix"]
+    did = distro["id"]
+    target = MOUNT_ROOT / did
+    target.mkdir(parents=True, exist_ok=True)
+    run(["mount", "-o", f"subvol={did}/@,{BTRFS_OPTS}", p_btrfs, str(target)])
+
+    for mnt, sv_path, opts in [
+        ("home", f"{did}/@home", BTRFS_OPTS),
+        (".snapshots", f"{did}/@snapshots", BTRFS_OPTS),
+        ("var/log", f"{did}/@var_log", BTRFS_OPTS),
+        ("var/cache", f"{did}/@var_cache", BTRFS_OPTS),
+        ("var/tmp", f"{did}/@var_tmp", BTRFS_OPTS),
+        ("srv/projects", "shared/@projects", BTRFS_OPTS),
+        ("var/lib/containers", "shared/@containers", BTRFS_OPTS),
+        ("var/lib/libvirt/images", "shared/@libvirt", BTRFS_NOCOW_OPTS),
+        ("swap", "shared/@swap", BTRFS_NOCOW_OPTS),
+    ]:
+        (target / mnt).mkdir(parents=True, exist_ok=True)
+        run(["mount", "-o", f"subvol={sv_path},{opts}", p_btrfs, str(target / mnt)])
+
+    if distro["dm_subvol"]:
+        dm_path = target / distro["dm_mount"].lstrip("/")
+        dm_path.mkdir(parents=True, exist_ok=True)
+        run(["mount", "-o", f"subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}", p_btrfs, str(dm_path)])
+
+    if distro["type"] == "fedora":
+        (target / "boot").mkdir(parents=True, exist_ok=True)
+        run(["mount", p_boot, str(target / "boot")])
+        (target / "boot" / "efi").mkdir(parents=True, exist_ok=True)
+        run(["mount", p_efi, str(target / "boot" / "efi")])
+
+    create_distro_swapfile(target, did, distro["swap_gb"])
+    provision_virtio_win_iso(target, source_mode)
+    print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
+
+    if distro["type"] == "fedora":
+        cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora_{arch['fedora_arch']}"]
+        cmd = [
+            "dnf", "-y", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}", "--releasever=41",
+            "install", "@core", "@virtualization", arch["fedora_efi_pkg"], "swtpm", "swtpm-tools",
+            "kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
+            "sudo", "akmods", "kmodtool", "openssl", "mokutil",
+            f"shim-{sfx}", f"grub2-efi-{sfx}", distro["desktop"],
+        ] + cache_arg
+        if source_mode == "cache":
+            cmd.append("--cacheonly")
+        run(cmd)
+    elif distro["type"] == "debian":
+        deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
+        deb_cache.mkdir(parents=True, exist_ok=True)
+        run([
+            "debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
+            "bookworm", str(target), "debian.org",
+        ])
+        with chroot_env(target):
+            chroot_run(target, ["apt-get", "update"])
+            chroot_run(
+                target,
+                [
+                    "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
+                    f"linux-image-{arch['debian_arch']}", "btrfs-progs", "snapper", "sudo",
+                    arch["debian_qemu_pkg"], "libvirt-daemon-system", "libvirt-clients",
+                    arch["debian_efi_pkg"], "swtpm", "swtpm-tools", "virt-manager",
+                    "dkms", f"linux-headers-{arch['debian_arch']}", "shim-signed",
+                    f"grub-efi-{arch['debian_arch']}-signed",
+                    "mokutil", "sbsigntool", distro["desktop"],
+                ],
+            )
+    elif distro["type"] == "alpine":
+        a_arch = arch["alpine_arch"]
+        alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
+        if source_mode == "internet" or not alpine_tar.exists():
+            url = f"alpinelinux.org{a_arch}/alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
+            run(["curl", "-L", "-o", str(alpine_tar), url])
+        run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
+        shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
+        with chroot_env(target):
+            chroot_run(
+                target,
+                [
+                    "/sbin/apk", "add", "--no-cache",
+                    "alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
+                    arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
+                    arch["fedora_efi_pkg"], "swtpm", "virt-install",
+                    *distro["desktop"].split(),
+                ],
+            )
+
+    generate_fstab(target, p_efi, p_boot, p_btrfs, distro)
+    configure_post_chroot(target, p_btrfs, distro, user_cfg, mok)
+
+    boot_dir = target / "boot"
+    kernel_file = ""
+    initrd_file = ""
+    if distro["type"] == "fedora":
+        kernels = sorted(boot_dir.glob("vmlinuz-"))
+        initrds = sorted(boot_dir.glob("initramfs-.img"))
+        if kernels:
+            kernel_file = f"/{kernels[-1].name}"
+        if initrds:
+            initrd_file = f"/{initrds[-1].name}"
+    elif distro["type"] == "debian":
+        kernels = sorted(boot_dir.glob("vmlinuz-"))
+        initrds = sorted(boot_dir.glob("initrd.img-"))
+        if kernels:
+            kernel_file = f"/{did}/@/boot/{kernels[-1].name}"
+        if initrds:
+            initrd_file = f"/{did}/@/boot/{initrds[-1].name}"
+    elif distro["type"] == "alpine":
+        kernel_file = f"/{did}/@/boot/vmlinuz-lts"
+        initrd_file = f"/{did}/@/boot/initramfs-lts"
+
+    run(["umount", "-R", str(target)])
+    return {
+        "distro": distro,
+        "kernel": kernel_file,
+        "initrd": initrd_file,
+    }
+
+
 def setup_refind_and_shim(
-disk: str, p_efi: str, p_boot: str, p_btrfs: str, boot_entries: list[dict], mok: dict[str, Path], user_cfg: dict
+    disk: str,
+    p_efi: str,
+    p_boot: str,
+    p_btrfs: str,
+    boot_entries: list[dict],
+    mok: dict[str, Path],
+    user_cfg: dict,
 ):
-arch = get_arch_spec()
-sfx = arch["efi_suffix"]
-print(f"\n=== Installing Official {arch['family']} Shim + MOK-Signed rEFInd Bootloader ===")
-efi_mnt = MOUNT_ROOT / "efi_setup"
-efi_mnt.mkdir(parents=True, exist_ok=True)
-run(["mount", p_efi, str(efi_mnt)])
-uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
-uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
-shim_name = f"shim{sfx}.efi"
-mm_name = f"mm{sfx}.efi"
-grub_name = f"grub{sfx}.efi"
-boot_fallback_name = f"boot{sfx}.efi"
-shim_src: Path | None = None
-mm_src: Path | None = None
-for candidate_dir in [
-efi_mnt / "EFI" / "fedora",
-efi_mnt / "EFI" / "debian",
-efi_mnt / "EFI" / "ubuntu",
-Path("/boot/efi/EFI/fedora"),
-Path("/usr/share/shim"),
-]:
-if (candidate_dir / shim_name).exists():
-shim_src = candidate_dir / shim_name
-mm_src = candidate_dir / mm_name
-break
-if not shim_src:
-sys.exit(f"Error: Official Microsoft-CA signed {shim_name} not found on EFI partition.")
-refind_dir = efi_mnt / "EFI" / "refind"
-boot_fallback_dir = efi_mnt / "EFI" / "BOOT"
-refind_dir.mkdir(parents=True, exist_ok=True)
-boot_fallback_dir.mkdir(parents=True, exist_ok=True)
-refind_bin, btrfs_drv_src = locate_refind_assets()
-if not refind_bin:
-sys.exit(f"Error: refind_{sfx}.efi binary not found.")
-src_refind_dir = refind_bin.parent
-if (src_refind_dir / "icons").is_dir() and not (refind_dir / "icons").exists():
-shutil.copytree(src_refind_dir / "icons", refind_dir / "icons")
-drivers_dst = refind_dir / f"drivers_{sfx}"
-drivers_dst.mkdir(parents=True, exist_ok=True)
-if btrfs_drv_src and btrfs_drv_src.exists():
-shutil.copy2(btrfs_drv_src, drivers_dst / f"btrfs_{sfx}.efi")
-signed_refind = refind_dir / grub_name
-run([
-"sbsign",
-"--key", str(mok["key"]),
-"--cert", str(mok["crt"]),
-"--output", str(signed_refind),
-str(refind_bin),
-])
-shutil.copy2(shim_src, refind_dir / shim_name)
-shutil.copy2(shim_src, boot_fallback_dir / boot_fallback_name)
-shutil.copy2(signed_refind, boot_fallback_dir / grub_name)
-if mm_src and mm_src.exists():
-shutil.copy2(mm_src, refind_dir / mm_name)
-shutil.copy2(mm_src, boot_fallback_dir / mm_name)
-shutil.copy2(mok["der"], efi_mnt / "MOK.der")
-btrfs_drv = drivers_dst / f"btrfs_{sfx}.efi"
-if btrfs_drv.exists():
-run([
-"sbsign",
-"--key", str(mok["key"]),
-"--cert", str(mok["crt"]),
-"--output", str(btrfs_drv),
-str(btrfs_drv),
-])
-stanzas = [
-f"# Generated by Multi-Distro {arch['family']} Secure Boot Installer",
-"timeout 10",
-"use_nvram false",
-"scanfor manual,external",
-"",
-]
-for entry in boot_entries:
-d = entry["distro"]
-did = d["id"]
-dtype = d["type"]
-kernel = entry["kernel"]
-initrd = entry["initrd"]
-if dtype == "fedora":
-vol_uuid = uuid_boot
-options = (
-f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
-f"nvme_core.default_ps_max_latency_us=0 rw quiet rhgb"
-)
-elif dtype == "debian":
-vol_uuid = uuid_btrfs
-options = (
-f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
-f"nvme_core.default_ps_max_latency_us=0 rw quiet"
-)
-else:
-vol_uuid = uuid_btrfs
-options = (
-f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
-f"modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"
-)
-stanzas.extend([
-f'menuentry "{d["name"]} (Secure Boot)" {{',
-f"    volume {vol_uuid}",
-f"    loader {kernel}",
-f"    initrd {initrd}",
-f'    options "{options}"',
-"}",
-"",
-])
-(refind_dir / "refind.conf").write_text("\n".join(stanzas))
-if Path("/sys/firmware/efi/efivars").is_dir():
-print("\n--- Queuing Local MOK for UEFI MokManager Enrollment on First Reboot ---")
-pw = user_cfg["password"]
-run(["mokutil", "--import", str(mok["der"])], input_text=f"{pw}\n{pw}\n", check=False)
-run([
-"efibootmgr", "--create",
-"--disk", disk,
-"--part", "1",
-"--label", f"rEFInd Secure Boot ({arch['family']})",
-"--loader", f"\EFI\refind\{shim_name}",
-], check=False)
-run(["umount", str(efi_mnt)])
+    arch = get_arch_spec()
+    sfx = arch["efi_suffix"]
+    print(f"\n=== Installing Official {arch['family']} Shim + MOK-Signed rEFInd Bootloader ===")
+    efi_mnt = MOUNT_ROOT / "efi_setup"
+    efi_mnt.mkdir(parents=True, exist_ok=True)
+    run(["mount", p_efi, str(efi_mnt)])
+    uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
+    uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
+    shim_name = f"shim{sfx}.efi"
+    mm_name = f"mm{sfx}.efi"
+    grub_name = f"grub{sfx}.efi"
+    boot_fallback_name = f"boot{sfx}.efi"
+    shim_src: Path | None = None
+    mm_src: Path | None = None
+
+    for candidate_dir in [
+        efi_mnt / "EFI" / "fedora",
+        efi_mnt / "EFI" / "debian",
+        efi_mnt / "EFI" / "ubuntu",
+        Path("/boot/efi/EFI/fedora"),
+        Path("/usr/share/shim"),
+    ]:
+        if (candidate_dir / shim_name).exists():
+            shim_src = candidate_dir / shim_name
+            mm_src = candidate_dir / mm_name
+            break
+
+    if not shim_src:
+        sys.exit(f"Error: Official Microsoft-CA signed {shim_name} not found on EFI partition.")
+
+    refind_dir = efi_mnt / "EFI" / "refind"
+    boot_fallback_dir = efi_mnt / "EFI" / "BOOT"
+    refind_dir.mkdir(parents=True, exist_ok=True)
+    boot_fallback_dir.mkdir(parents=True, exist_ok=True)
+    refind_bin, btrfs_drv_src = locate_refind_assets()
+    if not refind_bin:
+        sys.exit(f"Error: refind_{sfx}.efi binary not found.")
+    src_refind_dir = refind_bin.parent
+    if (src_refind_dir / "icons").is_dir() and not (refind_dir / "icons").exists():
+        shutil.copytree(src_refind_dir / "icons", refind_dir / "icons")
+
+    drivers_dst = refind_dir / f"drivers_{sfx}"
+    drivers_dst.mkdir(parents=True, exist_ok=True)
+    if btrfs_drv_src and btrfs_drv_src.exists():
+        shutil.copy2(btrfs_drv_src, drivers_dst / f"btrfs_{sfx}.efi")
+
+    signed_refind = refind_dir / grub_name
+    run([
+        "sbsign",
+        "--key", str(mok["key"]),
+        "--cert", str(mok["crt"]),
+        "--output", str(signed_refind),
+        str(refind_bin),
+    ])
+    shutil.copy2(shim_src, refind_dir / shim_name)
+    shutil.copy2(shim_src, boot_fallback_dir / boot_fallback_name)
+    shutil.copy2(signed_refind, boot_fallback_dir / grub_name)
+    if mm_src and mm_src.exists():
+        shutil.copy2(mm_src, refind_dir / mm_name)
+        shutil.copy2(mm_src, boot_fallback_dir / mm_name)
+    shutil.copy2(mok["der"], efi_mnt / "MOK.der")
+
+    btrfs_drv = drivers_dst / f"btrfs_{sfx}.efi"
+    if btrfs_drv.exists():
+        run([
+            "sbsign",
+            "--key", str(mok["key"]),
+            "--cert", str(mok["crt"]),
+            "--output", str(btrfs_drv),
+            str(btrfs_drv),
+        ])
+
+    stanzas = [
+        f"# Generated by Multi-Distro {arch['family']} Secure Boot Installer",
+        "timeout 10",
+        "use_nvram false",
+        "scanfor manual,external",
+        "",
+    ]
+
+    for entry in boot_entries:
+        d = entry["distro"]
+        did = d["id"]
+        dtype = d["type"]
+        kernel = entry["kernel"]
+        initrd = entry["initrd"]
+        if dtype == "fedora":
+            vol_uuid = uuid_boot
+            options = (
+                f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
+                f"nvme_core.default_ps_max_latency_us=0 rw quiet rhgb"
+            )
+        elif dtype == "debian":
+            vol_uuid = uuid_btrfs
+            options = (
+                f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
+                f"nvme_core.default_ps_max_latency_us=0 rw quiet"
+            )
+        else:
+            vol_uuid = uuid_btrfs
+            options = (
+                f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
+                f"modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"
+            )
+        stanzas.extend([
+            f'menuentry "{d["name"]} (Secure Boot)" {{',
+            f"    volume {vol_uuid}",
+            f"    loader {kernel}",
+            f"    initrd {initrd}",
+            f'    options "{options}"',
+            "}",
+            "",
+        ])
+
+    (refind_dir / "refind.conf").write_text("\n".join(stanzas))
+
+    if Path("/sys/firmware/efi/efivars").is_dir():
+        print("\n--- Queuing Local MOK for UEFI MokManager Enrollment on First Reboot ---")
+        pw = user_cfg["password"]
+        run(["mokutil", "--import", str(mok["der"])], input_text=f"{pw}\n{pw}\n", check=False)
+        run([
+            "efibootmgr", "--create",
+            "--disk", disk,
+            "--part", "1",
+            "--label", f"rEFInd Secure Boot ({arch['family']})",
+            "--loader", f"\\EFI\\refind\\{shim_name}",
+        ], check=False)
+
+    run(["umount", str(efi_mnt)])
+
+
 def main():
-if os.geteuid() != 0:
-sys.exit("Run this installer as root.")
-preflight_check()
-disk = input("\nEnter target block device (e.g., /dev/nvme0n1 or /dev/sda): ").strip()
-check_and_wipe_disk(disk)
-selected_distros = select_distros(single_mode=False)
-source_mode = select_source_mode()
-user_cfg = prompt_user_config()
-mok = generate_local_mok()
-p_efi, p_boot, p_btrfs = create_partitions(disk)
-create_btrfs_subvolumes(p_btrfs, selected_distros)
-boot_entries = []
-for distro in selected_distros:
-entry = bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
-boot_entries.append(entry)
-setup_refind_and_shim(disk, p_efi, p_boot, p_btrfs, boot_entries, mok, user_cfg)
-print("\n=== Installation Complete ===")
-print("Btrfs hierarchy ready: shared/@projects, shared/@containers, shared/@libvirt (nodatacow), shared/@swap")
-if name == "main":
-main()
+    if os.geteuid() != 0:
+        sys.exit("Run this installer as root.")
+    preflight_check()
+    disk = input("\nEnter target block device (e.g., /dev/nvme0n1 or /dev/sda): ").strip()
+    check_and_wipe_disk(disk)
+    selected_distros = select_distros(single_mode=False)
+    source_mode = select_source_mode()
+    user_cfg = prompt_user_config()
+    mok = generate_local_mok()
+    p_efi, p_boot, p_btrfs = create_partitions(disk)
+    create_btrfs_subvolumes(p_btrfs, selected_distros)
+    boot_entries = []
+
+    for distro in selected_distros:
+        entry = bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
+        boot_entries.append(entry)
+
+    setup_refind_and_shim(disk, p_efi, p_boot, p_btrfs, boot_entries, mok, user_cfg)
+    print("\n=== Installation Complete ===")
+    print("Btrfs hierarchy ready: shared/@projects, shared/@containers, shared/@libvirt (nodatacow), shared/@swap")
+
+
+if __name__ == "__main__":
+    main()
