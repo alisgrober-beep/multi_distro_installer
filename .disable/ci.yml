@@ -1,0 +1,49 @@
+name: CI Lint & Type Check
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Ruff, Mypy & Preflight Smoke Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install linter & type checker
+        run: uv pip install --system ruff mypy
+
+      - name: Run Ruff linter
+        run: ruff check multi_distro_installer.py multiboot_maint.py
+
+      - name: Run Ruff formatter check
+        run: ruff format --check multi_distro_installer.py multiboot_maint.py
+
+      - name: Run Mypy static type check
+        run: mypy --ignore-missing-imports multi_distro_installer.py multiboot_maint.py
+
+      - name: Verify safe module import & helper contracts
+        run: |
+          python3 -c "
+          import multi_distro_installer as inst
+          import multiboot_maint as maint
+          assert len(inst.DISTROS) == 6
+          assert callable(inst.preflight_check)
+          assert callable(inst.locate_refind_assets)
+          assert callable(maint.add_or_reinstall_single_os)
+          print('Modules imported cleanly and helper contracts verified.')
+          "
