@@ -267,6 +267,7 @@ def get_part_path(disk: str, part_num: int) -> str:
 def prompt_user_config(include_mok_note: bool = True) -> dict:
     note = " & MOK Enrollment Password" if include_mok_note else ""
     print(f"\n--- Configure Unified Developer User (UID 1000){note} ---")
+
     while True:
         username = input("Enter developer username (lowercase, e.g., dev): ").strip()
         if username and username.isalnum() and username.islower():
@@ -274,291 +275,337 @@ def prompt_user_config(include_mok_note: bool = True) -> dict:
         print("Invalid username. Use lowercase letters and numbers only.")
 
     while True:
-pw1 = getpass.getpass(f"Enter password for '{username}' (applied to user & root): ")
-pw2 = getpass.getpass("Confirm password: ")
-if pw1 and pw1 == pw2:
-break
-print("Passwords did not match or were empty. Try again.")
-return {"username": username, "password": pw1, "uid": 1000, "gid": 1000}
+        pw1 = getpass.getpass(f"Enter password for '{username}' (applied to user & root): ")
+        pw2 = getpass.getpass("Confirm password: ")
+        if pw1 and pw1 == pw2:
+            break
+        print("Passwords did not match or were empty. Try again.")
+
+    return {"username": username, "password": pw1, "uid": 1000, "gid": 1000}
+
+
 def generate_local_mok() -> dict[str, Path]:
-"""Loads existing MOK from cache or running OS (/etc/secureboot-mok), or generates a new one."""
-MOK_DIR.mkdir(parents=True, exist_ok=True)
-mok_key = MOK_DIR / "MOK.key"
-mok_crt = MOK_DIR / "MOK.crt"
-mok_der = MOK_DIR / "MOK.der"
-live_mok = Path("/etc/secureboot-mok")
-if not mok_key.exists() and (live_mok / "MOK.key").exists():
-shutil.copy2(live_mok / "MOK.key", mok_key)
-shutil.copy2(live_mok / "MOK.crt", mok_crt)
-shutil.copy2(live_mok / "MOK.der", mok_der)
-mok_key.chmod(0o600)
-if not (mok_key.exists() and mok_crt.exists() and mok_der.exists()):
-print("\n--- Generating Local Machine Owner Key (MOK) for UEFI Secure Boot ---")
-run([
-"openssl", "req", "-newkey", "rsa:2048", "-nodes",
-"-keyout", str(mok_key),
-"-new", "-x509", "-sha256", "-days", "3650",
-"-subj", "/CN=Local MultiBoot Developer MOK/",
-"-out", str(mok_crt),
-])
-run(["openssl", "x509", "-outform", "DER", "-in", str(mok_crt), "-out", str(mok_der)])
-mok_key.chmod(0o600)
-return {"key": mok_key, "crt": mok_crt, "der": mok_der}
+    """Loads existing MOK from cache or running OS (/etc/secureboot-mok), or generates a new one."""
+    MOK_DIR.mkdir(parents=True, exist_ok=True)
+    mok_key = MOK_DIR / "MOK.key"
+    mok_crt = MOK_DIR / "MOK.crt"
+    mok_der = MOK_DIR / "MOK.der"
+    live_mok = Path("/etc/secureboot-mok")
+
+    if not mok_key.exists() and (live_mok / "MOK.key").exists():
+        shutil.copy2(live_mok / "MOK.key", mok_key)
+        shutil.copy2(live_mok / "MOK.crt", mok_crt)
+        shutil.copy2(live_mok / "MOK.der", mok_der)
+        mok_key.chmod(0o600)
+
+    if not (mok_key.exists() and mok_crt.exists() and mok_der.exists()):
+        print("\n--- Generating Local Machine Owner Key (MOK) for UEFI Secure Boot ---")
+        run([
+            "openssl", "req", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(mok_key),
+            "-new", "-x509", "-sha256", "-days", "3650",
+            "-subj", "/CN=Local MultiBoot Developer MOK/",
+            "-out", str(mok_crt),
+        ])
+        run(["openssl", "x509", "-outform", "DER", "-in", str(mok_crt), "-out", str(mok_der)])
+        mok_key.chmod(0o600)
+
+    return {"key": mok_key, "crt": mok_crt, "der": mok_der}
+
+
 def check_and_wipe_disk(disk: str):
-if not Path(disk).is_block_device():
-sys.exit(f"Error: {disk} is not a valid block device.")
-print(f"\n--- Checking existing data on {disk} ---")
-run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", disk], check=False)
-sig = subprocess.run(["wipefs", disk], capture_output=True, text=True)
-if sig.stdout.strip():
-print(f"\nExisting filesystem/partition signatures detected:\n{sig.stdout}")
-confirm = input(f"\nWARNING: All data on {disk} will be DESTROYED. Type 'WIPE {disk}' to continue: ")
-if confirm.strip() != f"WIPE {disk}":
-sys.exit("Aborted by user.")
-run(["wipefs", "--all", "--force", disk])
-run(["sgdisk", "--zap-all", disk])
+    if not Path(disk).is_block_device():
+        sys.exit(f"Error: {disk} is not a valid block device.")
+
+    print(f"\n--- Checking existing data on {disk} ---")
+    run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", disk], check=False)
+    sig = subprocess.run(["wipefs", disk], capture_output=True, text=True)
+    if sig.stdout.strip():
+        print(f"\nExisting filesystem/partition signatures detected:\n{sig.stdout}")
+    confirm = input(f"\nWARNING: All data on {disk} will be DESTROYED. Type 'WIPE {disk}' to continue: ")
+    if confirm.strip() != f"WIPE {disk}":
+        sys.exit("Aborted by user.")
+
+    run(["wipefs", "--all", "--force", disk])
+    run(["sgdisk", "--zap-all", disk])
+
+
 def create_partitions(disk: str) -> tuple[str, str, str]:
-print(f"\n--- Creating GPT & Partitions on {disk} ---")
-run(["parted", "-s", disk, "mklabel", "gpt"])
-run(["parted", "-s", disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])
-run(["parted", "-s", disk, "set", "1", "esp", "on"])
-run(["parted", "-s", disk, "mkpart", "FEDORA_BOOT", "ext4", "513MiB", "4609MiB"])
-run(["parted", "-s", disk, "mkpart", "MULTIBOOT_BTRFS", "btrfs", "4609MiB", "100%"])
-run(["partprobe", disk])
-p_efi = get_part_path(disk, 1)
-p_boot = get_part_path(disk, 2)
-p_btrfs = get_part_path(disk, 3)
-run(["mkfs.fat", "-F32", "-n", "EFI", p_efi])
-run(["mkfs.ext4", "-F", "-L", "FEDORA_BOOT", p_boot])
-run(["mkfs.btrfs", "-f", "-L", "MULTIBOOT_POOL", p_btrfs])
-return p_efi, p_boot, p_btrfs
+    print(f"\n--- Creating GPT & Partitions on {disk} ---")
+    run(["parted", "-s", disk, "mklabel", "gpt"])
+    run(["parted", "-s", disk, "mkpart", "EFI", "fat32", "1MiB", "513MiB"])
+    run(["parted", "-s", disk, "set", "1", "esp", "on"])
+    run(["parted", "-s", disk, "mkpart", "FEDORA_BOOT", "ext4", "513MiB", "4609MiB"])
+    run(["parted", "-s", disk, "mkpart", "MULTIBOOT_BTRFS", "btrfs", "4609MiB", "100%"])
+    run(["partprobe", disk])
+
+    p_efi = get_part_path(disk, 1)
+    p_boot = get_part_path(disk, 2)
+    p_btrfs = get_part_path(disk, 3)
+    run(["mkfs.fat", "-F32", "-n", "EFI", p_efi])
+    run(["mkfs.ext4", "-F", "-L", "FEDORA_BOOT", p_boot])
+    run(["mkfs.btrfs", "-f", "-L", "MULTIBOOT_POOL", p_btrfs])
+    return p_efi, p_boot, p_btrfs
+
+
 def select_distros(single_mode: bool = False) -> list[dict]:
-arch = get_arch_spec()
-print(f"\n--- Select Target Systems ({arch['family']} / {arch['fedora_arch']}) ---")
-for key, info in DISTROS.items():
-print(f"  [{key}] {info['name']} ({info['id']})")
-if single_mode:
-choice = input("\nEnter single system number (e.g., 6): ").strip()
-if choice not in DISTROS:
-sys.exit("Invalid system selection.")
-return [DISTROS[choice]]
-choices = input("\nEnter comma-separated numbers (e.g., 1,3,6): ").strip().split(",")
-selected = [DISTROS[c.strip()] for c in choices if c.strip() in DISTROS]
-if not selected:
-sys.exit("No valid systems selected. Exiting.")
-return selected
+    arch = get_arch_spec()
+    print(f"\n--- Select Target Systems ({arch['family']} / {arch['fedora_arch']}) ---")
+    for key, info in DISTROS.items():
+        print(f"  [{key}] {info['name']} ({info['id']})")
+
+    if single_mode:
+        choice = input("\nEnter single system number (e.g., 6): ").strip()
+        if choice not in DISTROS:
+            sys.exit("Invalid system selection.")
+        return [DISTROS[choice]]
+
+    choices = input("\nEnter comma-separated numbers (e.g., 1,3,6): ").strip().split(",")
+    selected = [DISTROS[c.strip()] for c in choices if c.strip() in DISTROS]
+    if not selected:
+        sys.exit("No valid systems selected. Exiting.")
+    return selected
+
+
 def select_source_mode() -> str:
-print("\n--- Select Installation Source ---")
-print("  Fetch latest rootfs/packages from Internet (and cache locally)")
-print(f"  Use local preseeded cache ({CACHE_DIR})")
-mode = input("Choice [1/2]: ").strip()
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-return "cache" if mode == "2" else "internet"
+    print("\n--- Select Installation Source ---")
+    print("  Fetch latest rootfs/packages from Internet (and cache locally)")
+    print(f"  Use local preseeded cache ({CACHE_DIR})")
+    mode = input("Choice [1/2]: ").strip()
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return "cache" if mode == "2" else "internet"
+
+
 def ensure_shared_subvolumes(top_mnt: Path):
-shared_dir = top_mnt / "shared"
-shared_dir.mkdir(parents=True, exist_ok=True)
-for sv in ["@projects", "@containers", "@swap", "@libvirt"]:
-sv_path = shared_dir / sv
-if not sv_path.exists():
-run(["btrfs", "subvolume", "create", str(sv_path)])
-run(["chattr", "+C", str(shared_dir / "@swap")])
-run(["chattr", "+C", str(shared_dir / "@libvirt")])
+    shared_dir = top_mnt / "shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    for sv in ["@projects", "@containers", "@swap", "@libvirt"]:
+        sv_path = shared_dir / sv
+        if not sv_path.exists():
+            run(["btrfs", "subvolume", "create", str(sv_path)])
+    run(["chattr", "+C", str(shared_dir / "@swap")])
+    run(["chattr", "+C", str(shared_dir / "@libvirt")])
+
+
 def create_single_os_subvolumes(top_mnt: Path, distro: dict):
-os_dir = top_mnt / distro["id"]
-os_dir.mkdir(parents=True, exist_ok=True)
-distro_subvols = ["@", "@home", "@snapshots", "@var_log", "@var_cache", "@var_tmp"]
-if distro["dm_subvol"]:
-distro_subvols.append(distro["dm_subvol"])
-for sv in distro_subvols:
-sv_path = os_dir / sv
-if not sv_path.exists():
-run(["btrfs", "subvolume", "create", str(sv_path)])
+    os_dir = top_mnt / distro["id"]
+    os_dir.mkdir(parents=True, exist_ok=True)
+    distro_subvols = ["@", "@home", "@snapshots", "@var_log", "@var_cache", "@var_tmp"]
+    if distro["dm_subvol"]:
+        distro_subvols.append(distro["dm_subvol"])
+    for sv in distro_subvols:
+        sv_path = os_dir / sv
+        if not sv_path.exists():
+            run(["btrfs", "subvolume", "create", str(sv_path)])
+
+
 def wipe_os_folder_subvolumes(top_mnt: Path, os_id: str):
-os_dir = top_mnt / os_id
-if os_dir.exists():
-snap_dir = os_dir / "@snapshots"
-if snap_dir.exists():
-for sid_dir in sorted(snap_dir.iterdir()):
-snap_sv = sid_dir / "snapshot"
-if snap_sv.exists():
-run(["btrfs", "subvolume", "delete", str(snap_sv)], check=False)
-if sid_dir.is_dir():
-shutil.rmtree(sid_dir, ignore_errors=True)
-for sub in sorted(os_dir.iterdir()):
-if sub.is_dir():
-run(["btrfs", "subvolume", "delete", str(sub)], check=False)
-os_dir.rmdir()
-swapfile = top_mnt / "shared" / "@swap" / f"swapfile_{os_id}"
-if swapfile.exists():
-swapfile.unlink()
+    os_dir = top_mnt / os_id
+    if os_dir.exists():
+        snap_dir = os_dir / "@snapshots"
+        if snap_dir.exists():
+            for sid_dir in sorted(snap_dir.iterdir()):
+                snap_sv = sid_dir / "snapshot"
+                if snap_sv.exists():
+                    run(["btrfs", "subvolume", "delete", str(snap_sv)], check=False)
+                if sid_dir.is_dir():
+                    shutil.rmtree(sid_dir, ignore_errors=True)
+        for sub in sorted(os_dir.iterdir()):
+            if sub.is_dir():
+                run(["btrfs", "subvolume", "delete", str(sub)], check=False)
+        os_dir.rmdir()
+
+    swapfile = top_mnt / "shared" / "@swap" / f"swapfile_{os_id}"
+    if swapfile.exists():
+        swapfile.unlink()
+
+
 def create_btrfs_subvolumes(p_btrfs: str, selected_distros: list[dict]):
-top_mnt = MOUNT_ROOT / "btrfs_top"
-top_mnt.mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
-ensure_shared_subvolumes(top_mnt)
-for d in selected_distros:
-create_single_os_subvolumes(top_mnt, d)
-run(["umount", str(top_mnt)])
+    top_mnt = MOUNT_ROOT / "btrfs_top"
+    top_mnt.mkdir(parents=True, exist_ok=True)
+    run(["mount", "-o", "subvolid=5", p_btrfs, str(top_mnt)])
+    ensure_shared_subvolumes(top_mnt)
+    for d in selected_distros:
+        create_single_os_subvolumes(top_mnt, d)
+    run(["umount", str(top_mnt)])
+
+
 def create_distro_swapfile(target_root: Path, distro_id: str, size_gb: int):
-swap_file = target_root / "swap" / f"swapfile_{distro_id}"
-if not swap_file.exists():
-print(f"Creating {size_gb}G Btrfs swapfile for {distro_id}...")
-run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
+    swap_file = target_root / "swap" / f"swapfile_{distro_id}"
+    if not swap_file.exists():
+        print(f"Creating {size_gb}G Btrfs swapfile for {distro_id}...")
+        run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
+
+
 def provision_virtio_win_iso(target_root: Path, source_mode: str):
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-cached_iso = CACHE_DIR / "virtio-win.iso"
-libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
-libvirt_images.mkdir(parents=True, exist_ok=True)
-target_iso = libvirt_images / "virtio-win.iso"
-if target_iso.exists():
-return
-if not cached_iso.exists() and source_mode == "internet":
-print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
-run(["curl", "-L", "--fail", "-o", str(cached_iso), VIRTIO_WIN_URL], check=False)
-if cached_iso.exists():
-shutil.copy2(cached_iso, target_iso)
-target_iso.chmod(0o644)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached_iso = CACHE_DIR / "virtio-win.iso"
+    libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
+    libvirt_images.mkdir(parents=True, exist_ok=True)
+    target_iso = libvirt_images / "virtio-win.iso"
+    if target_iso.exists():
+        return
+    if not cached_iso.exists() and source_mode == "internet":
+        print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
+        run(["curl", "-L", "--fail", "-o", str(cached_iso), VIRTIO_WIN_URL], check=False)
+    if cached_iso.exists():
+        shutil.copy2(cached_iso, target_iso)
+        target_iso.chmod(0o644)
+
+
 def generate_fstab(target_root: Path, p_efi: str, p_boot: str, p_btrfs: str, distro: dict):
-did = distro["id"]
-uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
-uuid_efi = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_efi], text=True).strip()
-uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
-lines = [
-f"# /etc/fstab generated for {distro['name']} (Folder-isolated Btrfs + NVMe KVM layout)",
-f"UUID={uuid_btrfs}  /                        btrfs  subvol={did}/@,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /home                    btrfs  subvol={did}/@home,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /.snapshots              btrfs  subvol={did}/@snapshots,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /var/log                 btrfs  subvol={did}/@var_log,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /var/cache               btrfs  subvol={did}/@var_cache,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /var/tmp                 btrfs  subvol={did}/@var_tmp,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /srv/projects            btrfs  subvol=shared/@projects,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /var/lib/containers      btrfs  subvol=shared/@containers,{BTRFS_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /var/lib/libvirt/images  btrfs  subvol=shared/@libvirt,{BTRFS_NOCOW_OPTS}  0 0",
-f"UUID={uuid_btrfs}  /swap                    btrfs  subvol=shared/@swap,{BTRFS_NOCOW_OPTS}  0 0",
-f"/swap/swapfile_{did}  none                   swap   defaults,pri=10  0 0",
-f"UUID={uuid_efi}    /boot/efi                vfat   umask=0077  0 2",
-]
-if distro["dm_subvol"]:
-lines.append(
-f"UUID={uuid_btrfs}  {distro['dm_mount']}  btrfs  subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}  0 0"
-)
-if distro["type"] == "fedora":
-lines.append(f"UUID={uuid_boot}   /boot                ext4   defaults  0 2")
-fstab_path = target_root / "etc" / "fstab"
-fstab_path.parent.mkdir(parents=True, exist_ok=True)
-fstab_path.write_text("\n".join(lines) + "\n")
+    did = distro["id"]
+    uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
+    uuid_efi = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_efi], text=True).strip()
+    uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
+
+    lines = [
+        f"# /etc/fstab generated for {distro['name']} (Folder-isolated Btrfs + NVMe KVM layout)",
+        f"UUID={uuid_btrfs}  /                        btrfs  subvol={did}/@,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /home                    btrfs  subvol={did}/@home,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /.snapshots              btrfs  subvol={did}/@snapshots,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /var/log                 btrfs  subvol={did}/@var_log,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /var/cache               btrfs  subvol={did}/@var_cache,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /var/tmp                 btrfs  subvol={did}/@var_tmp,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /srv/projects            btrfs  subvol=shared/@projects,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /var/lib/containers      btrfs  subvol=shared/@containers,{BTRFS_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /var/lib/libvirt/images  btrfs  subvol=shared/@libvirt,{BTRFS_NOCOW_OPTS}  0 0",
+        f"UUID={uuid_btrfs}  /swap                    btrfs  subvol=shared/@swap,{BTRFS_NOCOW_OPTS}  0 0",
+        f"/swap/swapfile_{did}  none                   swap   defaults,pri=10  0 0",
+        f"UUID={uuid_efi}    /boot/efi                vfat   umask=0077  0 2",
+    ]
+    if distro["dm_subvol"]:
+        lines.append(
+            f"UUID={uuid_btrfs}  {distro['dm_mount']}  btrfs  subvol={did}/{distro['dm_subvol']},{BTRFS_OPTS}  0 0"
+        )
+    if distro["type"] == "fedora":
+        lines.append(f"UUID={uuid_boot}   /boot                ext4   defaults  0 2")
+
+    fstab_path = target_root / "etc" / "fstab"
+    fstab_path.parent.mkdir(parents=True, exist_ok=True)
+    fstab_path.write_text("\n".join(lines) + "\n")
+
+
 def configure_snapper_baseline(target: Path, p_btrfs: str, distro: dict, user_cfg: dict):
-did = distro["id"]
-dtype = distro["type"]
-uname = user_cfg["username"]
-snap_mnt = target / ".snapshots"
-snap_subvol_path = f"{did}/@snapshots"
-print(f"--- Configuring Snapper Baseline & Hooks for {distro['name']} ---")
-run(["umount", str(snap_mnt)])
-with chroot_env(target):
-chroot_run(target, ["snapper", "--no-dbus", "-c", "root", "create-config", "/"])
-chroot_run(target, ["btrfs", "subvolume", "delete", "/.snapshots"])
-snap_mnt.mkdir(parents=True, exist_ok=True)
-run(["mount", "-o", f"subvol={snap_subvol_path},{BTRFS_OPTS}", p_btrfs, str(snap_mnt)])
-snap_mnt.chmod(0o750)
-snap_cfg = target / "etc" / "snapper" / "configs" / "root"
-if snap_cfg.exists():
-cfg_text = snap_cfg.read_text()
-replacements = {
-'ALLOW_USERS=""': f'ALLOW_USERS="{uname}"',
-'TIMELINE_LIMIT_HOURLY="10"': 'TIMELINE_LIMIT_HOURLY="5"',
-'TIMELINE_LIMIT_DAILY="10"': 'TIMELINE_LIMIT_DAILY="7"',
-'TIMELINE_LIMIT_WEEKLY="0"': 'TIMELINE_LIMIT_WEEKLY="2"',
-'TIMELINE_LIMIT_MONTHLY="10"': 'TIMELINE_LIMIT_MONTHLY="1"',
-'TIMELINE_LIMIT_YEARLY="10"': 'TIMELINE_LIMIT_YEARLY="0"',
-}
-for old, new in replacements.items():
-cfg_text = cfg_text.replace(old, new)
-snap_cfg.write_text(cfg_text)
-with chroot_env(target):
-if dtype == "fedora":
-actions_dir = target / "etc" / "dnf" / "libdnf5-plugins" / "actions.d"
-actions_dir.mkdir(parents=True, exist_ok=True)
-(actions_dir / "snapper.actions").write_text(
-"# Automatic Snapper pre/post snapshots for DNF5\n"
-"pre_transaction::::/usr/bin/snapper create --type=pre --cleanup-algorithm=number "
-"--print-number --userdata=important=yes --description=dnf5_${{pid}}\n"
-"post_transaction::::/usr/bin/snapper create --type=post --cleanup-algorithm=number "
-"--pre-number=${{pre_snap_id}} --userdata=important=yes --description=dnf5_${{pid}}\n"
-)
-chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
-elif dtype == "debian":
-chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
-elif dtype == "alpine":
-cron_daily = target / "etc" / "periodic" / "daily" / "snapper"
-cron_daily.parent.mkdir(parents=True, exist_ok=True)
-cron_daily.write_text(
-"#!/bin/sh\n"
-"/usr/bin/snapper --no-dbus -c root create --type=single --cleanup-algorithm=timeline "
-'--description="daily-timeline"\n'
-"/usr/bin/snapper --no-dbus -c root cleanup timeline\n"
-"/usr/bin/snapper --no-dbus -c root cleanup number\n"
-)
-cron_daily.chmod(0o755)
-chroot_run(target, ["rc-update", "add", "crond", "default"], check=False)
-chroot_run(
-target,
-[
-"snapper", "--no-dbus", "-c", "root", "create",
-"--type", "single",
-"--cleanup-algorithm", "number",
-"--description", f"Baseline clean install ({distro['name']})",
-],
-)
+    did = distro["id"]
+    dtype = distro["type"]
+    uname = user_cfg["username"]
+    snap_mnt = target / ".snapshots"
+    snap_subvol_path = f"{did}/@snapshots"
+
+    print(f"--- Configuring Snapper Baseline & Hooks for {distro['name']} ---")
+    run(["umount", str(snap_mnt)])
+    with chroot_env(target):
+        chroot_run(target, ["snapper", "--no-dbus", "-c", "root", "create-config", "/"])
+        chroot_run(target, ["btrfs", "subvolume", "delete", "/.snapshots"])
+
+    snap_mnt.mkdir(parents=True, exist_ok=True)
+    run(["mount", "-o", f"subvol={snap_subvol_path},{BTRFS_OPTS}", p_btrfs, str(snap_mnt)])
+    snap_mnt.chmod(0o750)
+
+    snap_cfg = target / "etc" / "snapper" / "configs" / "root"
+    if snap_cfg.exists():
+        cfg_text = snap_cfg.read_text()
+        replacements = {
+            'ALLOW_USERS=""': f'ALLOW_USERS="{uname}"',
+            'TIMELINE_LIMIT_HOURLY="10"': 'TIMELINE_LIMIT_HOURLY="5"',
+            'TIMELINE_LIMIT_DAILY="10"': 'TIMELINE_LIMIT_DAILY="7"',
+            'TIMELINE_LIMIT_WEEKLY="0"': 'TIMELINE_LIMIT_WEEKLY="2"',
+            'TIMELINE_LIMIT_MONTHLY="10"': 'TIMELINE_LIMIT_MONTHLY="1"',
+            'TIMELINE_LIMIT_YEARLY="10"': 'TIMELINE_LIMIT_YEARLY="0"',
+        }
+        for old, new in replacements.items():
+            cfg_text = cfg_text.replace(old, new)
+        snap_cfg.write_text(cfg_text)
+
+    with chroot_env(target):
+        if dtype == "fedora":
+            actions_dir = target / "etc" / "dnf" / "libdnf5-plugins" / "actions.d"
+            actions_dir.mkdir(parents=True, exist_ok=True)
+            (actions_dir / "snapper.actions").write_text(
+                "# Automatic Snapper pre/post snapshots for DNF5\n"
+                "pre_transaction::::/usr/bin/snapper create --type=pre --cleanup-algorithm=number "
+                "--print-number --userdata=important=yes --description=dnf5_${{pid}}\n"
+                "post_transaction::::/usr/bin/snapper create --type=post --cleanup-algorithm=number "
+                "--pre-number=${{pre_snap_id}} --userdata=important=yes --description=dnf5_${{pid}}\n"
+            )
+            chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
+        elif dtype == "debian":
+            chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
+        elif dtype == "alpine":
+            cron_daily = target / "etc" / "periodic" / "daily" / "snapper"
+            cron_daily.parent.mkdir(parents=True, exist_ok=True)
+            cron_daily.write_text(
+                "#!/bin/sh\n"
+                "/usr/bin/snapper --no-dbus -c root create --type=single --cleanup-algorithm=timeline "
+                '--description="daily-timeline"\n'
+                "/usr/bin/snapper --no-dbus -c root cleanup timeline\n"
+                "/usr/bin/snapper --no-dbus -c root cleanup number\n"
+            )
+            cron_daily.chmod(0o755)
+            chroot_run(target, ["rc-update", "add", "crond", "default"], check=False)
+
+        chroot_run(
+            target,
+            [
+                "snapper", "--no-dbus", "-c", "root", "create",
+                "--type", "single",
+                "--cleanup-algorithm", "number",
+                "--description", f"Baseline clean install ({distro['name']})",
+            ],
+        )
+
+
 def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict[str, Path]):
-dtype = distro["type"]
-print(f"--- Configuring Secure Boot Module & Kernel Signing for {distro['name']} ---")
-sys_mok_dir = target / "etc" / "secureboot-mok"
-sys_mok_dir.mkdir(parents=True, exist_ok=True)
-shutil.copy2(mok["key"], sys_mok_dir / "MOK.key")
-shutil.copy2(mok["crt"], sys_mok_dir / "MOK.crt")
-shutil.copy2(mok["der"], sys_mok_dir / "MOK.der")
-(sys_mok_dir / "MOK.key").chmod(0o600)
-if dtype == "fedora":
-akmods_priv = target / "etc" / "pki" / "akmods" / "private"
-akmods_cert = target / "etc" / "pki" / "akmods" / "certs"
-akmods_priv.mkdir(parents=True, exist_ok=True)
-akmods_cert.mkdir(parents=True, exist_ok=True)
-shutil.copy2(mok["key"], akmods_priv / "private_key.priv")
-shutil.copy2(mok["der"], akmods_cert / "public_key.der")
-(akmods_priv / "private_key.priv").chmod(0o600)
-elif dtype == "debian":
-dkms_mok_dir = target / "var" / "lib" / "shim-signed" / "mok"
-dkms_mok_dir.mkdir(parents=True, exist_ok=True)
-shutil.copy2(mok["key"], dkms_mok_dir / "MOK.priv")
-shutil.copy2(mok["der"], dkms_mok_dir / "MOK.der")
-(dkms_mok_dir / "MOK.priv").chmod(0o600)
-dkms_conf = target / "etc" / "dkms" / "framework.conf.d" / "secureboot.conf"
-dkms_conf.parent.mkdir(parents=True, exist_ok=True)
-dkms_conf.write_text(
-'mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"\n'
-'mok_certificate="/var/lib/shim-signed/mok/MOK.der"\n'
-)
-elif dtype == "alpine":
-vmlinuz = target / "boot" / "vmlinuz-lts"
-if vmlinuz.exists():
-run([
-"sbsign",
-"--key", str(mok["key"]),
-"--cert", str(mok["crt"]),
-"--output", str(vmlinuz),
-str(vmlinuz),
-])
-hook_script = target / "etc" / "kernel-hooks.d" / "50-sign-kernel-mok.hook"
-hook_script.parent.mkdir(parents=True, exist_ok=True)
-hook_script.write_text(
-"#!/bin/sh\n"
-"if [ -f /boot/vmlinuz-lts ] && [ -f /etc/secureboot-mok/MOK.key ]; then\n"
-"  sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt "
-"--output /boot/vmlinuz-lts /boot/vmlinuz-lts\n"
-"fi\n"
-)
-hook_script.chmod(0o755)
+    dtype = distro["type"]
+    print(f"--- Configuring Secure Boot Module & Kernel Signing for {distro['name']} ---")
+    sys_mok_dir = target / "etc" / "secureboot-mok"
+    sys_mok_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(mok["key"], sys_mok_dir / "MOK.key")
+    shutil.copy2(mok["crt"], sys_mok_dir / "MOK.crt")
+    shutil.copy2(mok["der"], sys_mok_dir / "MOK.der")
+    (sys_mok_dir / "MOK.key").chmod(0o600)
+
+    if dtype == "fedora":
+        akmods_priv = target / "etc" / "pki" / "akmods" / "private"
+        akmods_cert = target / "etc" / "pki" / "akmods" / "certs"
+        akmods_priv.mkdir(parents=True, exist_ok=True)
+        akmods_cert.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(mok["key"], akmods_priv / "private_key.priv")
+        shutil.copy2(mok["der"], akmods_cert / "public_key.der")
+        (akmods_priv / "private_key.priv").chmod(0o600)
+    elif dtype == "debian":
+        dkms_mok_dir = target / "var" / "lib" / "shim-signed" / "mok"
+        dkms_mok_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(mok["key"], dkms_mok_dir / "MOK.priv")
+        shutil.copy2(mok["der"], dkms_mok_dir / "MOK.der")
+        (dkms_mok_dir / "MOK.priv").chmod(0o600)
+        dkms_conf = target / "etc" / "dkms" / "framework.conf.d" / "secureboot.conf"
+        dkms_conf.parent.mkdir(parents=True, exist_ok=True)
+        dkms_conf.write_text(
+            'mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"\n'
+            'mok_certificate="/var/lib/shim-signed/mok/MOK.der"\n'
+        )
+    elif dtype == "alpine":
+        vmlinuz = target / "boot" / "vmlinuz-lts"
+        if vmlinuz.exists():
+            run([
+                "sbsign",
+                "--key", str(mok["key"]),
+                "--cert", str(mok["crt"]),
+                "--output", str(vmlinuz),
+                str(vmlinuz),
+            ])
+        hook_script = target / "etc" / "kernel-hooks.d" / "50-sign-kernel-mok.hook"
+        hook_script.parent.mkdir(parents=True, exist_ok=True)
+        hook_script.write_text(
+            "#!/bin/sh\n"
+            "if [ -f /boot/vmlinuz-lts ] && [ -f /etc/secureboot-mok/MOK.key ]; then\n"
+            "  sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt "
+            "--output /boot/vmlinuz-lts /boot/vmlinuz-lts\n"
+            "fi\n"
+        )
+        hook_script.chmod(0o755)
 def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: dict, mok: dict[str, Path]):
 did = distro["id"]
 dtype = distro["type"]

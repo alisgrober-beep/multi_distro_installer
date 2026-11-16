@@ -250,59 +250,68 @@ def provision_windows_vm(
         "--cpu", "host-passthrough",
         "--vcpus", str(vcpus),
         "--memory", str(ram_mb),
-"--boot", boot_arg,
-"--tpm", f"backend.type=emulator,backend.version=2.0,model={arch['tpm_model']}",
-"--controller", "type=scsi,model=virtio-scsi",
-"--disk", f"path={disk_path},format=qcow2,bus=scsi,cache=none,io=native,discard=unmap",
-"--disk", f"path={win11_iso},device=cdrom,bus=scsi",
-"--disk", f"path={VIRTIO_ISO},device=cdrom,bus=scsi",
-"--network", "network=default,model=virtio",
-"--graphics", "spice,listen=127.0.0.1",
-"--video", "virtio",
-"--channel", "spicevmc",
-"--input", "type=tablet,bus=usb",
-"--input", "type=keyboard,bus=usb",
-"--osinfo", "win11",
-"--noautoconsole",
-]
-if unattend_iso and unattend_iso.exists():
-cmd.extend(["--disk", f"path={unattend_iso},device=cdrom,bus=scsi"])
-print(f"\n=== Provisioning Windows 11 ({arch['family']}) KVM Guest '{vm_name}' ===")
-run(cmd)
-xml_backup = LIBVIRT_IMAGES / f"{vm_name}.xml"
-xml_dump = subprocess.check_output(["virsh", "dumpxml", vm_name], text=True)
-xml_backup.write_text(xml_dump, encoding="utf-8")
-print(f"\n=== Windows 11 ({arch['family']}) VM Created ===")
-print(f"  Disk Image : {disk_path} (shared/@libvirt, nodatacow, discard=unmap)")
-print(f"  UEFI NVRAM : {shared_vars}")
-print(f"  Domain XML : {xml_backup}")
-print(f"\nConnect console via: virt-viewer {vm_name}  (or open virt-manager)")
-print(f"When hopping to another distro, run: sudo ./win11_vm.py --name {vm_name} --register-only")
+        "--boot", boot_arg,
+        "--tpm", f"backend.type=emulator,backend.version=2.0,model={arch['tpm_model']}",
+        "--controller", "type=scsi,model=virtio-scsi",
+        "--disk", f"path={disk_path},format=qcow2,bus=scsi,cache=none,io=native,discard=unmap",
+        "--disk", f"path={win11_iso},device=cdrom,bus=scsi",
+        "--disk", f"path={VIRTIO_ISO},device=cdrom,bus=scsi",
+        "--network", "network=default,model=virtio",
+        "--graphics", "spice,listen=127.0.0.1",
+        "--video", "virtio",
+        "--channel", "spicevmc",
+        "--input", "type=tablet,bus=usb",
+        "--input", "type=keyboard,bus=usb",
+        "--osinfo", "win11",
+        "--noautoconsole",
+    ]
+    if unattend_iso and unattend_iso.exists():
+        cmd.extend(["--disk", f"path={unattend_iso},device=cdrom,bus=scsi"])
+
+    print(f"\n=== Provisioning Windows 11 ({arch['family']}) KVM Guest '{vm_name}' ===")
+    run(cmd)
+
+    xml_backup = LIBVIRT_IMAGES / f"{vm_name}.xml"
+    xml_dump = subprocess.check_output(["virsh", "dumpxml", vm_name], text=True)
+    xml_backup.write_text(xml_dump, encoding="utf-8")
+
+    print(f"\n=== Windows 11 ({arch['family']}) VM Created ===")
+    print(f"  Disk Image : {disk_path} (shared/@libvirt, nodatacow, discard=unmap)")
+    print(f"  UEFI NVRAM : {shared_vars}")
+    print(f"  Domain XML : {xml_backup}")
+    print(f"\nConnect console via: virt-viewer {vm_name}  (or open virt-manager)")
+    print(f"When hopping to another distro, run: sudo ./win11_vm.py --name {vm_name} --register-only")
+
+
 def main():
-if os.geteuid() != 0:
-sys.exit("Run this script as root.")
-arch = get_vm_arch_spec()
-default_name = f"win11-{arch['family']}"
-parser = argparse.ArgumentParser(
-description="Provision or register a Windows 11 (arm64/amd64) KVM guest on shared/@libvirt"
-)
-parser.add_argument("--name", default=default_name, help=f"VM domain name (default: {default_name})")
-parser.add_argument("--iso", type=Path, help=f"Path to Windows 11 ({arch['family']}) installation ISO")
-parser.add_argument("--disk-gb", type=int, default=80, help="Virtual NVMe disk size in GiB (default: 80)")
-parser.add_argument("--ram-mb", type=int, default=8192, help="Guest RAM in MiB (default: 8192)")
-parser.add_argument("--vcpus", type=int, default=4, help="Number of host-passthrough vCPUs (default: 4)")
-parser.add_argument(
-"--register-only",
-action="store_true",
-help="Register an existing VM from /var/lib/libvirt/images/.xml into the current host OS",
-)
-args = parser.parse_args()
-if args.register_only:
-register_existing_vm(args.name)
-else:
-if not args.iso:
-iso_input = input(f"Enter full path to Windows 11 ({arch['family']}) ISO: ").strip()
-args.iso = Path(iso_input)
-provision_windows_vm(args.name, args.iso, args.disk_gb, args.ram_mb, args.vcpus)
-if name == "main":
-main()
+    if os.geteuid() != 0:
+        sys.exit("Run this script as root.")
+
+    arch = get_vm_arch_spec()
+    default_name = f"win11-{arch['family']}"
+    parser = argparse.ArgumentParser(
+        description="Provision or register a Windows 11 (arm64/amd64) KVM guest on shared/@libvirt"
+    )
+    parser.add_argument("--name", default=default_name, help=f"VM domain name (default: {default_name})")
+    parser.add_argument("--iso", type=Path, help=f"Path to Windows 11 ({arch['family']}) installation ISO")
+    parser.add_argument("--disk-gb", type=int, default=80, help="Virtual NVMe disk size in GiB (default: 80)")
+    parser.add_argument("--ram-mb", type=int, default=8192, help="Guest RAM in MiB (default: 8192)")
+    parser.add_argument("--vcpus", type=int, default=4, help="Number of host-passthrough vCPUs (default: 4)")
+    parser.add_argument(
+        "--register-only",
+        action="store_true",
+        help="Register an existing VM from /var/lib/libvirt/images/.xml into the current host OS",
+    )
+    args = parser.parse_args()
+
+    if args.register_only:
+        register_existing_vm(args.name)
+    else:
+        if not args.iso:
+            iso_input = input(f"Enter full path to Windows 11 ({arch['family']}) ISO: ").strip()
+            args.iso = Path(iso_input)
+        provision_windows_vm(args.name, args.iso, args.disk_gb, args.ram_mb, args.vcpus)
+
+
+if __name__ == "__main__":
+    main()
