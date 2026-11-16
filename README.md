@@ -99,7 +99,7 @@ sudo ./multiboot_maint.py
 2. Atomic Snapper Rollback: Moves `<os_id>/@` aside to `@_pre_rollback_<timestamp>` and snapshots your chosen Snapper ID into `<os_id>/@`.
 3. Wipe Single OS: Deletes all snapshots, subvolumes, swapfile, and rEFInd stanza for one OS while keeping `shared/` untouched.
 4. Sync rEFInd Kernels: Updates `refind.conf` after kernel upgrades or rollbacks.
-5. Add / Reinstall Single OS: Deploys a new distro folder (or cleanly replaces an existing one) using your existing enrolled MOK keys.
+5. Add / Reinstall Single OS: Deploys a new distro folder (or cleanly replaces an existing one) using your existing enrolled MOK keys. The maintenance helper follows the same single-distro selector contract as the installer, so it resolves the chosen distro as the first item from the valid selection list.
 
 ### 4. Windows 11 KVM Guest Provisioning (arm64 & amd64)
 

@@ -186,8 +186,7 @@ def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
         print("Error: Missing EFI, FEDORA_BOOT, or MULTIBOOT_POOL partition.")
         return
 
-    selected = installer.select_distros(single_mode=True)
-    distro = selected
+    distro = installer.select_distros(single_mode=True)[0]
     os_id = distro["id"]
 
     if is_os_currently_booted(os_id):
@@ -239,7 +238,15 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
 
     for os_id in list_installed_os_folders():
         root_dir = POOL_MNT / os_id / "@"
-        pretty_name = os_id.replace("_", " ").title()
+        pretty_name_map = {
+            "fedora_kde": "Fedora KDE",
+            "fedora_gnome": "Fedora GNOME",
+            "debian_gnome": "Debian GNOME",
+            "debian_kde": "Debian KDE",
+            "alpine_xfce": "Alpine XFCE",
+            "alpine_sway": "Alpine Sway",
+        }
+        pretty_name = pretty_name_map.get(os_id, os_id.replace("_", " ").title())
 
         if os_id.startswith("fedora") and p_boot:
             kernels = sorted(BOOT_MNT.glob("vmlinuz-*"))
