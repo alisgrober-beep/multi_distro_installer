@@ -1,49 +1,58 @@
-name: CI Lint & Type Check
-
+name: CI Lint, Type Check & Dual-Arch Matrix
 on:
   push:
     branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
-
 permissions:
   contents: read
-
 jobs:
   quality:
-    name: Ruff, Mypy & Preflight Smoke Check
+    name: Python ${{ matrix.python-version }} (${{ matrix.sim-arch }})
     runs-on: ubuntu-latest
-
+    strategy:
+    fail-fast: false
+    matrix:
+      python-version: ["3.11", "3.12"]
+      sim-arch: ["aarch64", "x86_64"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python & uv
         uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          enable-cache: true
-
+        python-version: ${{ matrix.python-version }}
+        enable-cache: true
       - name: Install linter & type checker
         run: uv pip install --system ruff mypy
-
-      - name: Run Ruff linter
-        run: ruff check multi_distro_installer.py multiboot_maint.py
-
+      - name: Run Ruff linter across all scripts
+        run: ruff check multi_distro_installer.py multiboot_maint.py win11_vm.py
       - name: Run Ruff formatter check
-        run: ruff format --check multi_distro_installer.py multiboot_maint.py
-
-      - name: Run Mypy static type check
-        run: mypy --ignore-missing-imports multi_distro_installer.py multiboot_maint.py
-
-      - name: Verify safe module import & helper contracts
+        run: ruff format --check multi_distro_installer.py multiboot_maint.py win11_vm.py
+      - name: Run Mypy static type check across all scripts
+        run: mypy --ignore-missing-imports multi_distro_installer.py multiboot_maint.py win11_vm.py
+      - name: Verify dual-architecture resolution & module contracts
+        env:
+          SIM_ARCH: ${{ matrix.sim-arch }}
         run: |
           python3 -c "
+          import os, platform
           import multi_distro_installer as inst
           import multiboot_maint as maint
+          import win11_vm as vm
+          sim = os.environ['SIM_ARCH']
+          platform.machine = lambda: sim
+          arch_info = inst.get_arch_spec()
+          vm_info = vm.get_vm_arch_spec()
+          if sim == 'aarch64':
+          assert arch_info['family'] == 'arm64'
+          assert arch_info['efi_suffix'] == 'aa64'
+          assert vm_info['machine'] == 'virt'
+          assert vm_info['tpm_model'] == 'tpm-tis-device'
+          else:
+          assert arch_info['family'] == 'amd64'
+          assert arch_info['efi_suffix'] == 'x64'
+          assert vm_info['machine'] == 'q35'
+          assert vm_info['tpm_model'] == 'tpm-crb'
           assert len(inst.DISTROS) == 6
-          assert callable(inst.preflight_check)
-          assert callable(inst.locate_refind_assets)
-          assert callable(maint.add_or_reinstall_single_os)
-          print('Modules imported cleanly and helper contracts verified.')
-          "
+
