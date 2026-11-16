@@ -1,0 +1,21 @@
+Congratulations on getting the whole project committed and CI-ready! That is a 
+clean, solid architecture to test on bare metal.
+Here is a quick Pre-Flight Hardware Test Checklist to keep handy when you boot
+ your Live ISO:
+• Confirm UEFI & Secure Boot State: Before running multi_distro_installer.py, 
+verify ls /sys/firmware/efi/efivars returns files so mokutil and efibootmgr can
+ write directly to NVRAM.
+• Keep a Backup Copy of MOK.der: After installation finishes, MOK.der is placed
+ on the root of your EFI partition (MOK.der) as a fallback in case MokManager 
+ doesn't auto-trigger on the first reboot—you can browse to it manually via 
+ Enroll key from disk in the blue MokManager menu.
+• Test Snapper & rEFInd Sync Early: Once you boot into your first distro, run 
+ snapper -c root list to verify Snapshot #1 is active, and try booting a second 
+ distro from the rEFInd menu to confirm shared/@projects and shared/@libvirt 
+ mount cleanly with UID 1000 permissions.
+ Good luck with the hardware run—have fun hopping between Fedora, Debian, 
+ Alpine, and your Windows 11 KVM guest!
+ If you hit any hardware quirks, Secure Boot NVRAM messages, or distro-specific
+ chroot edge cases during your test run, share the output here and we can patc
+ them right away!
+ 
