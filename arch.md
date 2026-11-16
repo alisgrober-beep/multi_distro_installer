@@ -7,4 +7,4 @@ Repository Structure
 # Preflight, GPT/Btrfs setup, chroot bootstrap, Snapper & Secure Boot ├── multiboot_maint.py          
 # Interactive pool inspector, Snapper rollback, rEFInd sync & single-OS add ├── win11_vm.py                
 # Dual-arch Windows 11 KVM guest provisioner & cross-distro VM registrar └── README.md                   
-# Architecture, usage & CI documentation 
+# Architecture, usage & CI documentation ├── arch.py
