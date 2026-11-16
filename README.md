@@ -63,6 +63,7 @@ MULTIBOOT_POOL (subvolid=5)
 
 - Recommended Live ISO: Boot from a Fedora Workstation or KDE Live ISO (aarch64 or x86_64) in UEFI mode. Fedora Live works with UEFI Secure Boot enabled out of the box and includes `dnf5` and `btrfs-progs >= 6.1`.
 - Automatic Dependency Resolution: `preflight_check()` automatically detects your architecture, checks UEFI mode, installs missing host CLI tools (`debootstrap`, `sbsigntools`, `mokutil`, `efibootmgr`, `gdisk`, `parted`, `dosfstools`, `e2fsprogs`), and stages upstream rEFInd (0.14.2) before touching any disk.
+- Verified Upstream Sources: The installer downloads the official direct URLs for rEFInd 0.14.2 from SourceForge and the stable `virtio-win.iso` from Fedora People, so the bootstrapper and VM helper match the actual upstream artifacts they claim to fetch.
 
 ## Usage Guide
 

@@ -14,9 +14,9 @@ MOK_DIR = CACHE_DIR / "mok"
 MOUNT_ROOT = Path("/mnt/multiboot_target")
 BTRFS_OPTS = "defaults,noatime,compress=zstd:1,space_cache=v2"
 BTRFS_NOCOW_OPTS = "defaults,noatime,nodatacow"
-VIRTIO_WIN_URL = "https://fedorapeople.org"
+VIRTIO_WIN_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 REFIND_VERSION = "0.14.2"
-REFIND_ZIP_URL = f"https://sourceforge.net{REFIND_VERSION}/refind-bin-{REFIND_VERSION}.zip/download"
+REFIND_ZIP_URL = f"https://sourceforge.net/projects/refind/files/{REFIND_VERSION}/refind-bin-{REFIND_VERSION}.zip/download"
 
 DISTROS = {
     "1": {

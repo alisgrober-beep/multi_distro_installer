@@ -9,7 +9,7 @@ from pathlib import Path
 
 LIBVIRT_IMAGES = Path("/var/lib/libvirt/images")
 VIRTIO_ISO = LIBVIRT_IMAGES / "virtio-win.iso"
-VIRTIO_WIN_URL = "https://fedorapeople.org"
+VIRTIO_WIN_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 
 
 def get_vm_arch_spec() -> dict[str, str]:
