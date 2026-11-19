@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import getpass
+import json
 import os
 import platform
 import shutil
@@ -317,8 +318,60 @@ def check_and_wipe_disk(disk: str):
     if not Path(disk).is_block_device():
         sys.exit(f"Error: {disk} is not a valid block device.")
 
+    def inspect_disk_usage() -> tuple[set[str], set[Path]]:
+        result = subprocess.run(
+            ["lsblk", "--json", "--paths", "--output", "PATH,MOUNTPOINTS", disk],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        device_paths: set[str] = set()
+        mountpoints: set[Path] = set()
+
+        def collect_devices(device: dict):
+            device_paths.add(os.path.realpath(device["path"]))
+            for mountpoint in device.get("mountpoints") or []:
+                if mountpoint:
+                    mountpoints.add(Path(mountpoint).resolve())
+            for child in device.get("children") or []:
+                collect_devices(child)
+
+        for device in json.loads(result.stdout)["blockdevices"]:
+            collect_devices(device)
+        return device_paths, mountpoints
+
     print(f"\n--- Checking existing data on {disk} ---")
     run(["lsblk", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", disk], check=False)
+    device_paths, mountpoints = inspect_disk_usage()
+    mount_root = MOUNT_ROOT.resolve()
+    mounts_outside_installer = sorted(
+        mountpoint for mountpoint in mountpoints if not mountpoint.is_relative_to(mount_root)
+    )
+    if mounts_outside_installer:
+        formatted_mounts = "\n".join(f"  {mountpoint}" for mountpoint in mounts_outside_installer)
+        sys.exit(
+            f"Error: Refusing to wipe {disk}; its partitions are mounted outside {mount_root}:\n"
+            f"{formatted_mounts}\nUnmount them and retry."
+        )
+
+    active_swaps = []
+    for line in Path("/proc/swaps").read_text().splitlines()[1:]:
+        swap_path = line.split()[0]
+        resolved_swap = os.path.realpath(swap_path)
+        if resolved_swap in device_paths or Path(swap_path).resolve().is_relative_to(mount_root):
+            active_swaps.append(swap_path)
+    if active_swaps:
+        formatted_swaps = "\n".join(f"  {swap_path}" for swap_path in active_swaps)
+        sys.exit(
+            f"Error: Refusing to wipe {disk}; active swap is using it:\n"
+            f"{formatted_swaps}\nDisable the swap with swapoff and retry."
+        )
+
+    if mountpoints:
+        print("Existing mounts under the installer mount root will be unmounted before wiping:")
+        for mountpoint in sorted(mountpoints, key=lambda path: len(path.parts), reverse=True):
+            print(f"  {mountpoint}")
+
     sig = subprocess.run(["wipefs", disk], capture_output=True, text=True)
     if sig.stdout.strip():
         print(f"\nExisting filesystem/partition signatures detected:\n{sig.stdout}")
@@ -326,8 +379,22 @@ def check_and_wipe_disk(disk: str):
     if confirm.strip() != f"WIPE {disk}":
         sys.exit("Aborted by user.")
 
+    for mountpoint in sorted(mountpoints, key=lambda path: len(path.parts), reverse=True):
+        run(["umount", str(mountpoint)])
+
+    remaining_devices, remaining_mountpoints = inspect_disk_usage()
+    if remaining_mountpoints:
+        formatted_mounts = "\n".join(f"  {mountpoint}" for mountpoint in sorted(remaining_mountpoints))
+        sys.exit(
+            f"Error: Refusing to wipe {disk}; these mounts remain active:\n"
+            f"{formatted_mounts}"
+        )
+    if remaining_devices != device_paths:
+        sys.exit(f"Error: The block-device layout for {disk} changed during cleanup; refusing to wipe it.")
+
     run(["wipefs", "--all", "--force", disk])
     run(["sgdisk", "--zap-all", disk])
+    run(["partprobe", disk])
 
 
 def create_partitions(disk: str) -> tuple[str, str, str]:

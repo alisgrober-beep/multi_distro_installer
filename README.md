@@ -76,7 +76,7 @@ sudo ./multi_distro_installer.py
 ```
 
 1. Preflight Check: Validates arm64/amd64 UEFI mode and resolves missing dependencies.
-2. Target Block Device: Enter your drive (e.g., `/dev/nvme0n1`) and type `WIPE <device>` to confirm.
+2. Target Block Device: Enter your drive (e.g., `/dev/nvme0n1`) and type `WIPE <device>` to confirm. Stale mounts under `/mnt/multiboot_target` are unmounted first; partitions mounted elsewhere or in active swap cause the installer to stop safely.
 3. Target OS Selection: Enter comma-separated numbers of the distros to deploy.
 4. Installation Source: Fetch from Internet (cached under `/var/cache/multiboot_installer`) or install offline from a preseeded cache.
 5. Unified Developer User: Enforces `UID 1000` / `GID 1000` across all distros and sets user, root, and MOK enrollment passwords.
