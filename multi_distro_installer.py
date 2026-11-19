@@ -504,6 +504,24 @@ def create_distro_swapfile(target_root: Path, distro_id: str, size_gb: int):
         run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
 
 
+def installer_cache_dir(target_root: Path) -> Path:
+    cache_dir = target_root / "var" / "lib" / "libvirt" / "images" / ".multiboot_installer_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def move_cache_to_target(source: Path, destination: Path):
+    if not source.exists():
+        return
+    print(f"Moving cached data from {source} to target disk at {destination}.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+        shutil.rmtree(source)
+    else:
+        shutil.move(source, destination)
+
+
 def provision_virtio_win_iso(target_root: Path, source_mode: str):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cached_iso = CACHE_DIR / "virtio-win.iso"
@@ -512,11 +530,15 @@ def provision_virtio_win_iso(target_root: Path, source_mode: str):
     target_iso = libvirt_images / "virtio-win.iso"
     if target_iso.exists():
         return
-    if not cached_iso.exists() and source_mode == "internet":
-        print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
-        run(["curl", "-L", "--fail", "-o", str(cached_iso), VIRTIO_WIN_URL], check=False)
     if cached_iso.exists():
-        shutil.copy2(cached_iso, target_iso)
+        print("Moving cached virtio-win.iso to the target disk.")
+        shutil.move(cached_iso, target_iso)
+    elif source_mode == "internet":
+        print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
+        partial_iso = target_iso.with_suffix(".iso.part")
+        run(["curl", "-L", "--fail", "-o", str(partial_iso), VIRTIO_WIN_URL])
+        partial_iso.replace(target_iso)
+    if target_iso.exists():
         target_iso.chmod(0o644)
 
 
@@ -799,12 +821,29 @@ def bootstrap_distro(
         (target / "boot" / "efi").mkdir(parents=True, exist_ok=True)
         run(["mount", p_efi, str(target / "boot" / "efi")])
 
+    cache_dir = installer_cache_dir(target)
+    if distro["type"] == "fedora":
+        move_cache_to_target(
+            CACHE_DIR / f"fedora_{arch['fedora_arch']}",
+            cache_dir / f"fedora_{arch['fedora_arch']}",
+        )
+    elif distro["type"] == "debian":
+        move_cache_to_target(
+            CACHE_DIR / f"debian_{arch['debian_arch']}",
+            cache_dir / f"debian_{arch['debian_arch']}",
+        )
+    elif distro["type"] == "alpine":
+        alpine_archive = f"alpine-minirootfs-{arch['alpine_arch']}.tar.gz"
+        move_cache_to_target(CACHE_DIR / alpine_archive, cache_dir / alpine_archive)
+
     create_distro_swapfile(target, did, distro["swap_gb"])
     provision_virtio_win_iso(target, source_mode)
     print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
 
     if distro["type"] == "fedora":
-        cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora_{arch['fedora_arch']}"]
+        fedora_cache = cache_dir / f"fedora_{arch['fedora_arch']}"
+        fedora_cache.mkdir(parents=True, exist_ok=True)
+        cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={fedora_cache}"]
         cmd = [
             "dnf", "-y", "--use-host-config", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}",
             "install", "@core", "@virtualization", arch["fedora_efi_pkg"], "swtpm", "swtpm-tools",
@@ -816,7 +855,7 @@ def bootstrap_distro(
             cmd.append("--cacheonly")
         run(cmd)
     elif distro["type"] == "debian":
-        deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
+        deb_cache = cache_dir / f"debian_{arch['debian_arch']}"
         deb_cache.mkdir(parents=True, exist_ok=True)
         run([
             "debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
@@ -838,7 +877,7 @@ def bootstrap_distro(
             )
     elif distro["type"] == "alpine":
         a_arch = arch["alpine_arch"]
-        alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
+        alpine_tar = cache_dir / f"alpine-minirootfs-{a_arch}.tar.gz"
         if source_mode == "internet" or not alpine_tar.exists():
             url = f"alpinelinux.org{a_arch}/alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
             run(["curl", "-L", "-o", str(alpine_tar), url])
