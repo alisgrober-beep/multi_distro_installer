@@ -985,7 +985,7 @@ def bootstrap_distro(
         deb_cache.mkdir(parents=True, exist_ok=True)
         run([
             "debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
-            "bookworm", str(target), "debian.org",
+            "bookworm", str(target), "https://deb.debian.org/debian",
         ])
         apt_cache = deb_cache / "apt"
         apt_archives = apt_cache / "archives"
