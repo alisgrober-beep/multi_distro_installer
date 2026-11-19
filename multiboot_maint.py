@@ -276,15 +276,19 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
                     "",
                 ])
         elif os_id.startswith("alpine"):
-            stanzas.extend([
-                f'menuentry "{pretty_name} (Secure Boot)" {{',
-                f"    volume {uuid_btrfs}",
-                f"    loader /{os_id}/@/boot/vmlinuz-lts",
-                f"    initrd /{os_id}/@/boot/initramfs-lts",
-                f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
-                "}",
-                "",
-            ])
+            boot_dir = root_dir / "boot"
+            kernels = sorted(boot_dir.glob("vmlinuz-lts*"))
+            initrds = sorted(boot_dir.glob("initramfs-lts*"))
+            if kernels and initrds:
+                stanzas.extend([
+                    f'menuentry "{pretty_name} (Secure Boot)" {{',
+                    f"    volume {uuid_btrfs}",
+                    f"    loader /{os_id}/@/boot/{kernels[-1].name}",
+                    f"    initrd /{os_id}/@/boot/{initrds[-1].name}",
+                    f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
+                    "}",
+                    "",
+                ])
 
     refind_conf = EFI_MNT / "EFI" / "refind" / "refind.conf"
     refind_conf.parent.mkdir(parents=True, exist_ok=True)

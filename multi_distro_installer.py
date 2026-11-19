@@ -1145,6 +1145,26 @@ def bootstrap_distro(
                     *distro["desktop"].split(),
                 ],
             )
+            mkinitfs_conf = target / "etc" / "mkinitfs" / "mkinitfs.conf"
+            if mkinitfs_conf.is_file():
+                conf_text = mkinitfs_conf.read_text()
+                if "features=" in conf_text:
+                    lines = conf_text.splitlines()
+                    for index, line in enumerate(lines):
+                        if line.startswith("features=") and "btrfs" not in line:
+                            lines[index] = line.rstrip()[:-1] + " btrfs\""
+                            break
+                    mkinitfs_conf.write_text("\n".join(lines) + "\n")
+                elif "btrfs" not in conf_text:
+                    mkinitfs_conf.write_text(conf_text.rstrip() + '\nfeatures="btrfs"\n')
+            chroot_run(
+                target,
+                [
+                    "sh", "-c",
+                    'set -e; kver="$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -n 1)"; '
+                    'test -n "$kver"; mkinitfs -o /boot/initramfs-lts "$kver"',
+                ],
+            )
 
     generate_fstab(target, p_efi, p_boot, p_btrfs, distro)
     configure_post_chroot(target, p_btrfs, distro, user_cfg, mok)
@@ -1167,8 +1187,12 @@ def bootstrap_distro(
         if initrds:
             initrd_file = f"/{did}/@/boot/{initrds[-1].name}"
     elif distro["type"] == "alpine":
-        kernel_file = f"/{did}/@/boot/vmlinuz-lts"
-        initrd_file = f"/{did}/@/boot/initramfs-lts"
+        kernels = sorted(boot_dir.glob("vmlinuz-lts*"))
+        initrds = sorted(boot_dir.glob("initramfs-lts*"))
+        if kernels:
+            kernel_file = f"/{did}/@/boot/{kernels[-1].name}"
+        if initrds:
+            initrd_file = f"/{did}/@/boot/{initrds[-1].name}"
 
     run(["umount", "-R", str(target)])
     return {
