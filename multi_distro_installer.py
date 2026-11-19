@@ -733,6 +733,12 @@ def configure_snapper_baseline(target: Path, p_btrfs: str, distro: dict, user_cf
 
     print(f"--- Configuring Snapper Baseline & Hooks for {distro['name']} ---")
     run(["umount", str(snap_mnt)])
+    if snap_mnt.exists():
+        try:
+            snap_mnt.rmdir()
+        except OSError as exc:
+            raise RuntimeError(f"Expected an empty Snapper mountpoint at {snap_mnt}") from exc
+
     with chroot_env(target):
         chroot_run(target, ["snapper", "--no-dbus", "-c", "root", "create-config", "/"])
         chroot_run(target, ["btrfs", "subvolume", "delete", "/.snapshots"])
@@ -864,9 +870,10 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
             sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
             sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
             sudoers_dropin.chmod(0o440)
-            if distro["dm"]:
+            # Debian's gdm3 package selects display-manager.service via debconf; its unit is static.
+            if distro["dm"] and not (dtype == "debian" and distro["dm"] == "gdm3"):
                 chroot_run(target, ["systemctl", "enable", distro["dm"]], check=False)
-                chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
+            chroot_run(target, ["systemctl", "enable", "libvirtd"], check=False)
             if dtype == "fedora":
                 (target / ".autorelabel").touch()
 
