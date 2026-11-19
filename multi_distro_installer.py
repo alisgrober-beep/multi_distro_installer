@@ -4,8 +4,11 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -121,7 +124,13 @@ def run(cmd: list, check: bool = True, input_text: str | None = None):
     return subprocess.run(cmd, check=check, text=True, input=input_text)
 
 
-def set_chroot_passwords(target: Path, username: str, password: str):
+def set_target_passwords(target: Path, username: str, password: str):
+    if username == "root":
+        raise ValueError("The developer username cannot be 'root'.")
+    shadow_file = target / "etc" / "shadow"
+    if shadow_file.is_symlink() or not shadow_file.is_file():
+        raise RuntimeError(f"Target shadow password file is missing or invalid: {shadow_file}")
+
     def hash_password() -> str:
         result = subprocess.run(
             ["openssl", "passwd", "-6", "-stdin"],
@@ -135,13 +144,42 @@ def set_chroot_passwords(target: Path, username: str, password: str):
             raise RuntimeError("OpenSSL did not produce a SHA-512 crypt password hash.")
         return password_hash
 
-    root_hash = hash_password()
-    user_hash = hash_password()
-    chroot_run(
-        target,
-        ["chpasswd", "--encrypted"],
-        input_text=f"root:{root_hash}\n{username}:{user_hash}\n",
-    )
+    hashes = {"root": hash_password(), username: hash_password()}
+    changed = set()
+    today = str(int(time.time() // 86400))
+    lines = shadow_file.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        fields = line.split(":")
+        if fields[0] in hashes:
+            if len(fields) < 9:
+                raise RuntimeError(f"Malformed shadow entry for {fields[0]} in {shadow_file}")
+            fields[1] = hashes[fields[0]]
+            fields[2] = today
+            lines[index] = ":".join(fields)
+            changed.add(fields[0])
+
+    missing = hashes.keys() - changed
+    if missing:
+        raise RuntimeError(f"Missing shadow entries in {shadow_file}: {', '.join(sorted(missing))}")
+
+    metadata = shadow_file.stat()
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=shadow_file.parent, prefix=".shadow.", delete=False
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write("\n".join(lines) + "\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.chown(temp_path, metadata.st_uid, metadata.st_gid)
+        os.chmod(temp_path, stat.S_IMODE(metadata.st_mode))
+        # The target is offline; update its shadow database without relying on PAM or its lock setup.
+        os.replace(temp_path, shadow_file)
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+    print(f"[EXEC] Updated root and {username} passwords in {shadow_file}")
 
 
 def merge_cache_directory(source: Path, destination: Path):
@@ -383,9 +421,9 @@ def prompt_user_config(include_mok_note: bool = True) -> dict:
 
     while True:
         username = input("Enter developer username (lowercase, e.g., dev): ").strip()
-        if username and username.isalnum() and username.islower():
+        if username and username != "root" and username.isalnum() and username.islower():
             break
-        print("Invalid username. Use lowercase letters and numbers only.")
+        print("Invalid username. Use lowercase letters and numbers only; 'root' is reserved.")
 
     while True:
         pw1 = getpass.getpass(f"Enter password for '{username}' (applied to user & root): ")
@@ -818,9 +856,8 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
             chroot_run(
                 target,
                 ["useradd", "-m", "-u", uid, "-g", gid, "-G", f"{admin_group},libvirt,kvm", "-s", "/bin/bash", uname],
-                check=False,
             )
-            set_chroot_passwords(target, uname, passwd)
+            set_target_passwords(target, uname, passwd)
             sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
             sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
             sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
@@ -848,9 +885,8 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
                     "useradd", "-m", "-u", uid, "-g", gid,
                     "-G", "wheel,video,input,audio,libvirt,kvm", "-s", "/bin/bash", uname,
                 ],
-                check=False,
             )
-            set_chroot_passwords(target, uname, passwd)
+            set_target_passwords(target, uname, passwd)
             sudoers_dropin = target / "etc" / "sudoers.d" / "10-wheel"
             sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
             sudoers_dropin.write_text("%wheel ALL=(ALL:ALL) ALL\n")
