@@ -217,9 +217,13 @@ def provision_windows_vm(
 
     ensure_libvirt_ready()
 
-    if not VIRTIO_ISO.exists():
+    if not VIRTIO_ISO.is_file() or VIRTIO_ISO.stat().st_size == 0:
         print("--- Downloading virtio-win.iso into shared/@libvirt ---")
-        run(["curl", "-L", "--fail", "-o", str(VIRTIO_ISO), VIRTIO_WIN_URL])
+        partial_iso = VIRTIO_ISO.with_name(f"{VIRTIO_ISO.name}.part")
+        run(["curl", "-L", "--fail", "--continue-at", "-", "-o", str(partial_iso), VIRTIO_WIN_URL])
+        if not partial_iso.is_file() or partial_iso.stat().st_size == 0:
+            raise RuntimeError(f"Download did not produce a non-empty ISO: {VIRTIO_ISO}")
+        partial_iso.replace(VIRTIO_ISO)
 
     code_fw, vars_tmpl = locate_uefi_firmware(arch["family"])
 

@@ -186,6 +186,11 @@ def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
         print("Error: Missing EFI, FEDORA_BOOT, or MULTIBOOT_POOL partition.")
         return
 
+    installer.prepare_installer_cache()
+    installer.merge_cache_directory(
+        POOL_MNT / "shared" / "@libvirt" / ".multiboot_installer_cache",
+        installer.CACHE_DIR,
+    )
     distro = installer.select_distros(single_mode=True)[0]
     os_id = distro["id"]
 
@@ -200,14 +205,13 @@ def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
             return
         installer.wipe_os_folder_subvolumes(POOL_MNT, os_id)
 
-    source_mode = installer.select_source_mode()
     user_cfg = installer.prompt_user_config(include_mok_note=False)
     mok = installer.generate_local_mok()
 
     installer.ensure_shared_subvolumes(POOL_MNT)
     installer.create_single_os_subvolumes(POOL_MNT, distro)
 
-    installer.bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
+    installer.bootstrap_distro(p_efi, p_boot, p_btrfs, distro, user_cfg, mok)
 
     sync_refind_kernels(p_efi, p_boot, p_btrfs)
     print(f"\n=== {distro['name']} ({os_id}/) successfully installed with KVM/libvirt & added to rEFInd! ===")

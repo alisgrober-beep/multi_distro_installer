@@ -10,7 +10,8 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
-CACHE_DIR = Path("/var/cache/multiboot_installer")
+CACHE_DIR = Path("/tmp/multiboot_installer_cache")
+LEGACY_CACHE_DIR = Path("/var/cache/multiboot_installer")
 MOK_DIR = CACHE_DIR / "mok"
 MOUNT_ROOT = Path("/mnt/multiboot_target")
 BTRFS_OPTS = "defaults,noatime,compress=zstd:1,space_cache=v2"
@@ -118,6 +119,69 @@ def run(cmd: list, check: bool = True, input_text: str | None = None):
     return subprocess.run(cmd, check=check, text=True, input=input_text)
 
 
+def merge_cache_directory(source: Path, destination: Path):
+    if not source.exists():
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        dest_entry = destination / entry.name
+        if entry.is_dir() and not entry.is_symlink():
+            if dest_entry.is_dir() and not dest_entry.is_symlink():
+                merge_cache_directory(entry, dest_entry)
+            elif dest_entry.exists() or dest_entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                shutil.move(entry, dest_entry)
+        elif dest_entry.exists() or dest_entry.is_symlink():
+            entry.unlink()
+        else:
+            shutil.move(entry, dest_entry)
+    source.rmdir()
+
+
+def prepare_installer_cache():
+    if CACHE_DIR.is_symlink():
+        sys.exit(f"Error: Installer cache path must not be a symlink: {CACHE_DIR}")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not CACHE_DIR.is_dir() or CACHE_DIR.stat().st_uid != os.geteuid():
+        sys.exit(f"Error: Installer cache must be a directory owned by the current user: {CACHE_DIR}")
+    CACHE_DIR.chmod(0o700)
+    if LEGACY_CACHE_DIR.exists():
+        print(f"Reusing existing downloads from {LEGACY_CACHE_DIR}.")
+        merge_cache_directory(LEGACY_CACHE_DIR, CACHE_DIR)
+    for target_cache in MOUNT_ROOT.glob("*/var/lib/libvirt/images/.multiboot_installer_cache"):
+        if target_cache.is_dir():
+            print(f"Reusing existing downloads from {target_cache}.")
+            merge_cache_directory(target_cache, CACHE_DIR)
+    for target_iso in MOUNT_ROOT.glob("*/var/lib/libvirt/images/virtio-win.iso"):
+        cached_iso = CACHE_DIR / "virtio-win.iso"
+        if (
+            target_iso.is_file()
+            and target_iso.stat().st_size > 0
+            and (not cached_iso.is_file() or cached_iso.stat().st_size == 0)
+        ):
+            print(f"Reusing existing download from {target_iso}.")
+            shutil.copy2(target_iso, cached_iso)
+    for partial_iso in MOUNT_ROOT.glob("*/var/lib/libvirt/images/virtio-win.iso.part"):
+        cached_partial = CACHE_DIR / "virtio-win.iso.part"
+        if partial_iso.is_file() and partial_iso.stat().st_size > 0 and not cached_partial.exists():
+            print(f"Resuming existing download from {partial_iso}.")
+            shutil.copy2(partial_iso, cached_partial)
+
+
+def download_cached_file(url: str, destination: Path):
+    if destination.is_file() and destination.stat().st_size > 0:
+        print(f"[CACHE] Reusing {destination}")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(f"{destination.name}.part")
+    print(f"--- Downloading {url} ---")
+    run(["curl", "-L", "--fail", "--continue-at", "-", "-o", str(partial), url])
+    if not partial.is_file() or partial.stat().st_size == 0:
+        raise RuntimeError(f"Download did not produce a non-empty cache file: {destination}")
+    partial.replace(destination)
+
+
 def locate_refind_assets() -> tuple[Path | None, Path | None]:
     """Finds refind_<arch>.efi and btrfs_<arch>.efi on the host live system."""
     arch = get_arch_spec()
@@ -153,8 +217,7 @@ def stage_upstream_refind():
     zip_path = CACHE_DIR / f"refind-bin-{REFIND_VERSION}.zip"
     extract_dir = CACHE_DIR / "refind_extracted"
 
-    if not zip_path.exists():
-        run(["curl", "-L", "--fail", "-o", str(zip_path), REFIND_ZIP_URL])
+    download_cached_file(REFIND_ZIP_URL, zip_path)
 
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
@@ -201,12 +264,26 @@ def preflight_check():
         ans = input("Attempt to install missing packages automatically now? [Y/n]: ").strip().lower()
         if ans in ("", "y", "yes"):
             if shutil.which("dnf"):
+                dnf_cache = CACHE_DIR / "host-dnf"
+                dnf_cache.mkdir(parents=True, exist_ok=True)
                 pkgs = sorted({tool_packages[t][0] for t in missing_tools})
-                run(["dnf", "install", "-y", *pkgs])
+                run([
+                    "dnf", "-y", f"--setopt=cachedir={dnf_cache}", "--setopt=keepcache=True",
+                    "install", *pkgs,
+                ])
             elif shutil.which("apt-get"):
+                apt_cache = CACHE_DIR / "host-apt"
+                apt_archives = apt_cache / "archives"
+                apt_lists = apt_cache / "lists"
+                for apt_dir in (apt_archives / "partial", apt_lists / "partial"):
+                    apt_dir.mkdir(parents=True, exist_ok=True)
+                apt_opts = [
+                    "-o", f"Dir::Cache::archives={apt_archives}",
+                    "-o", f"Dir::State::lists={apt_lists}",
+                ]
                 pkgs = sorted({tool_packages[t][1] for t in missing_tools})
-                run(["apt-get", "update"])
-                run(["apt-get", "install", "-y", *pkgs])
+                run(["apt-get", *apt_opts, "update"])
+                run(["apt-get", *apt_opts, "install", "-y", *pkgs])
             else:
                 sys.exit("No supported package manager (dnf/apt-get) found to auto-install dependencies.")
         else:
@@ -224,11 +301,9 @@ def preflight_check():
 
     refind_bin, _ = locate_refind_assets()
     if not refind_bin:
-        print(f"rEFInd binary (refind_{arch['efi_suffix']}.efi) not found on host.")
-        ans = input(f"Download and stage upstream rEFInd {REFIND_VERSION} now? [Y/n]: ").strip().lower()
-        if ans in ("", "y", "yes"):
-            stage_upstream_refind()
-            refind_bin, _ = locate_refind_assets()
+        print(f"rEFInd binary (refind_{arch['efi_suffix']}.efi) not found; staging upstream rEFInd.")
+        stage_upstream_refind()
+        refind_bin, _ = locate_refind_assets()
         if not refind_bin:
             sys.exit(f"Error: refind_{arch['efi_suffix']}.efi is required for UEFI Secure Boot setup.")
 
@@ -236,7 +311,7 @@ def preflight_check():
 
 
 @contextmanager
-def chroot_env(target: Path):
+def chroot_env(target: Path, extra_binds: list[tuple[Path, Path]] | None = None):
     binds = ["dev", "dev/pts", "proc", "sys", "run"]
     if Path("/sys/firmware/efi/efivars").is_dir():
         binds.append("sys/firmware/efi/efivars")
@@ -246,6 +321,11 @@ def chroot_env(target: Path):
         for b in binds:
             src = Path("/") / b
             dst = target / b
+            dst.mkdir(parents=True, exist_ok=True)
+            run(["mount", "--bind", str(src), str(dst)])
+            mounted.append(dst)
+        for src, dst in extra_binds or []:
+            src.mkdir(parents=True, exist_ok=True)
             dst.mkdir(parents=True, exist_ok=True)
             run(["mount", "--bind", str(src), str(dst)])
             mounted.append(dst)
@@ -434,15 +514,6 @@ def select_distros(single_mode: bool = False) -> list[dict]:
     return selected
 
 
-def select_source_mode() -> str:
-    print("\n--- Select Installation Source ---")
-    print("  Fetch latest rootfs/packages from Internet (and cache locally)")
-    print(f"  Use local preseeded cache ({CACHE_DIR})")
-    mode = input("Choice [1/2]: ").strip()
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return "cache" if mode == "2" else "internet"
-
-
 def ensure_shared_subvolumes(top_mnt: Path):
     shared_dir = top_mnt / "shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
@@ -515,42 +586,33 @@ def prepare_fedora_installroot(target_root: Path):
         group_file.write_text("root:x:0:\n")
 
 
-def installer_cache_dir(target_root: Path) -> Path:
-    cache_dir = target_root / "var" / "lib" / "libvirt" / "images" / ".multiboot_installer_cache"
+def prepare_alpine_cache(target_root: Path, cache_dir: Path):
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    cache_link = target_root / "etc" / "apk" / "cache"
+    cache_link.parent.mkdir(parents=True, exist_ok=True)
+    if cache_link.is_symlink():
+        if os.readlink(cache_link) == "/var/cache/apk":
+            return
+        cache_link.unlink()
+    elif cache_link.exists():
+        if not cache_link.is_dir():
+            sys.exit(f"Error: Expected an APK cache directory or symlink at {cache_link}")
+        merge_cache_directory(cache_link, cache_dir)
+    os.symlink("/var/cache/apk", cache_link)
 
 
-def move_cache_to_target(source: Path, destination: Path):
-    if not source.exists():
-        return
-    print(f"Moving cached data from {source} to target disk at {destination}.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        shutil.copytree(source, destination, dirs_exist_ok=True)
-        shutil.rmtree(source)
-    else:
-        shutil.move(source, destination)
-
-
-def provision_virtio_win_iso(target_root: Path, source_mode: str):
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+def provision_virtio_win_iso(target_root: Path):
     cached_iso = CACHE_DIR / "virtio-win.iso"
     libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
     libvirt_images.mkdir(parents=True, exist_ok=True)
     target_iso = libvirt_images / "virtio-win.iso"
-    if target_iso.exists():
+    if target_iso.is_file() and target_iso.stat().st_size > 0:
         return
-    if cached_iso.exists():
-        print("Moving cached virtio-win.iso to the target disk.")
-        shutil.move(cached_iso, target_iso)
-    elif source_mode == "internet":
-        print("--- Downloading virtio-win.iso for Windows KVM Guest Drivers ---")
-        partial_iso = target_iso.with_suffix(".iso.part")
-        run(["curl", "-L", "--fail", "-o", str(partial_iso), VIRTIO_WIN_URL])
-        partial_iso.replace(target_iso)
-    if target_iso.exists():
-        target_iso.chmod(0o644)
+    if target_iso.exists() and not target_iso.is_file():
+        sys.exit(f"Error: Expected a file at the VirtIO ISO path: {target_iso}")
+    download_cached_file(VIRTIO_WIN_URL, cached_iso)
+    shutil.copy2(cached_iso, target_iso)
+    target_iso.chmod(0o644)
 
 
 def generate_fstab(target_root: Path, p_efi: str, p_boot: str, p_btrfs: str, distro: dict):
@@ -717,7 +779,13 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
     print(f"\n--- Configuring Post-Chroot User, KVM/Libvirt & Services for {distro['name']} ---")
     (target / "etc" / "hostname").write_text(f"{hostname}\n")
 
-    with chroot_env(target):
+    extra_binds: list[tuple[Path, Path]] = []
+    if dtype == "alpine":
+        alpine_apk_cache = CACHE_DIR / f"alpine_{get_arch_spec()['alpine_arch']}" / "apk"
+        alpine_apk_cache.mkdir(parents=True, exist_ok=True)
+        extra_binds.append((alpine_apk_cache, target / "var" / "cache" / "apk"))
+
+    with chroot_env(target, extra_binds):
         if dtype in ("fedora", "debian"):
             admin_group = "wheel" if dtype == "fedora" else "sudo"
             chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
@@ -742,7 +810,10 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
         elif dtype == "alpine":
             chroot_run(
                 target,
-                ["/sbin/apk", "add", "--no-cache", "shadow", "sudo", "doas", "bash", "sbsigntool"],
+                [
+                    "/sbin/apk", "add",
+                    "shadow", "sudo", "doas", "bash", "sbsigntool",
+                ],
             )
             chroot_run(target, ["groupadd", "-f", "-g", gid, uname])
             chroot_run(target, ["groupadd", "-f", "libvirt"], check=False)
@@ -796,7 +867,6 @@ def bootstrap_distro(
     p_boot: str,
     p_btrfs: str,
     distro: dict,
-    source_mode: str,
     user_cfg: dict,
     mok: dict[str, Path],
 ) -> dict:
@@ -832,28 +902,13 @@ def bootstrap_distro(
         (target / "boot" / "efi").mkdir(parents=True, exist_ok=True)
         run(["mount", p_efi, str(target / "boot" / "efi")])
 
-    cache_dir = installer_cache_dir(target)
-    if distro["type"] == "fedora":
-        move_cache_to_target(
-            CACHE_DIR / f"fedora_{arch['fedora_arch']}",
-            cache_dir / f"fedora_{arch['fedora_arch']}",
-        )
-    elif distro["type"] == "debian":
-        move_cache_to_target(
-            CACHE_DIR / f"debian_{arch['debian_arch']}",
-            cache_dir / f"debian_{arch['debian_arch']}",
-        )
-    elif distro["type"] == "alpine":
-        alpine_archive = f"alpine-minirootfs-{arch['alpine_arch']}.tar.gz"
-        move_cache_to_target(CACHE_DIR / alpine_archive, cache_dir / alpine_archive)
-
     create_distro_swapfile(target, did, distro["swap_gb"])
-    provision_virtio_win_iso(target, source_mode)
-    print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
+    provision_virtio_win_iso(target)
+    print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm) ===")
 
     if distro["type"] == "fedora":
         prepare_fedora_installroot(target)
-        fedora_cache = cache_dir / f"fedora_{arch['fedora_arch']}"
+        fedora_cache = CACHE_DIR / f"fedora_{arch['fedora_arch']}"
         fedora_cache.mkdir(parents=True, exist_ok=True)
         cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={fedora_cache}"]
         cmd = [
@@ -863,17 +918,26 @@ def bootstrap_distro(
             "sudo", "akmods", "kmodtool", "openssl", "mokutil",
             f"shim-{sfx}", f"grub2-efi-{sfx}", distro["desktop"],
         ] + cache_arg
-        if source_mode == "cache":
-            cmd.append("--cacheonly")
         run(cmd)
     elif distro["type"] == "debian":
-        deb_cache = cache_dir / f"debian_{arch['debian_arch']}"
+        deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
         deb_cache.mkdir(parents=True, exist_ok=True)
         run([
             "debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
             "bookworm", str(target), "debian.org",
         ])
-        with chroot_env(target):
+        apt_cache = deb_cache / "apt"
+        apt_archives = apt_cache / "archives"
+        apt_lists = apt_cache / "lists"
+        for apt_dir in (apt_archives / "partial", apt_lists / "partial"):
+            apt_dir.mkdir(parents=True, exist_ok=True)
+        with chroot_env(
+            target,
+            [
+                (apt_archives, target / "var" / "cache" / "apt" / "archives"),
+                (apt_lists, target / "var" / "lib" / "apt" / "lists"),
+            ],
+        ):
             chroot_run(target, ["apt-get", "update"])
             chroot_run(
                 target,
@@ -889,22 +953,21 @@ def bootstrap_distro(
             )
     elif distro["type"] == "alpine":
         a_arch = arch["alpine_arch"]
-        alpine_tar = cache_dir / f"alpine-minirootfs-{a_arch}.tar.gz"
-        if source_mode == "internet" or not alpine_tar.exists():
-            url = (
-                f"https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/{a_arch}/"
-                f"alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
-            )
-            partial_tar = alpine_tar.with_name(f"{alpine_tar.name}.part")
-            run(["curl", "-L", "--fail", "-o", str(partial_tar), url])
-            partial_tar.replace(alpine_tar)
+        alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
+        url = (
+            f"https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/{a_arch}/"
+            f"alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
+        )
+        download_cached_file(url, alpine_tar)
         run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
         shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
-        with chroot_env(target):
+        alpine_apk_cache = CACHE_DIR / f"alpine_{a_arch}" / "apk"
+        prepare_alpine_cache(target, alpine_apk_cache)
+        with chroot_env(target, [(alpine_apk_cache, target / "var" / "cache" / "apk")]):
             chroot_run(
                 target,
                 [
-                    "/sbin/apk", "add", "--no-cache",
+                    "/sbin/apk", "add",
                     "alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
                     arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
                     arch["fedora_efi_pkg"], "swtpm", "virt-install",
@@ -1087,11 +1150,11 @@ def setup_refind_and_shim(
 def main():
     if os.geteuid() != 0:
         sys.exit("Run this installer as root.")
+    prepare_installer_cache()
     preflight_check()
     disk = input("\nEnter target block device (e.g., /dev/nvme0n1 or /dev/sda): ").strip()
     check_and_wipe_disk(disk)
     selected_distros = select_distros(single_mode=False)
-    source_mode = select_source_mode()
     user_cfg = prompt_user_config()
     mok = generate_local_mok()
     p_efi, p_boot, p_btrfs = create_partitions(disk)
@@ -1099,7 +1162,7 @@ def main():
     boot_entries = []
 
     for distro in selected_distros:
-        entry = bootstrap_distro(p_efi, p_boot, p_btrfs, distro, source_mode, user_cfg, mok)
+        entry = bootstrap_distro(p_efi, p_boot, p_btrfs, distro, user_cfg, mok)
         boot_entries.append(entry)
 
     setup_refind_and_shim(disk, p_efi, p_boot, p_btrfs, boot_entries, mok, user_cfg)
