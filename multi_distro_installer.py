@@ -1153,15 +1153,15 @@ def bootstrap_distro(
     kernel_file = ""
     initrd_file = ""
     if distro["type"] == "fedora":
-        kernels = sorted(boot_dir.glob("vmlinuz-"))
-        initrds = sorted(boot_dir.glob("initramfs-.img"))
+        kernels = sorted(boot_dir.glob("vmlinuz-*"))
+        initrds = sorted(boot_dir.glob("initramfs-*.img"))
         if kernels:
             kernel_file = f"/{kernels[-1].name}"
         if initrds:
             initrd_file = f"/{initrds[-1].name}"
     elif distro["type"] == "debian":
-        kernels = sorted(boot_dir.glob("vmlinuz-"))
-        initrds = sorted(boot_dir.glob("initrd.img-"))
+        kernels = sorted(boot_dir.glob("vmlinuz-*"))
+        initrds = sorted(boot_dir.glob("initrd.img-*"))
         if kernels:
             kernel_file = f"/{did}/@/boot/{kernels[-1].name}"
         if initrds:
@@ -1273,6 +1273,9 @@ def setup_refind_and_shim(
         dtype = d["type"]
         kernel = entry["kernel"]
         initrd = entry["initrd"]
+        if not kernel or not initrd:
+            print(f"Warning: No kernel/initrd pair found for {d['name']}; skipping rEFInd stanza.")
+            continue
         if dtype == "fedora":
             vol_uuid = uuid_boot
             options = (
@@ -1283,7 +1286,7 @@ def setup_refind_and_shim(
             vol_uuid = uuid_btrfs
             options = (
                 f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
-                f"nvme_core.default_ps_max_latency_us=0 rw quiet"
+                f"rootfstype=btrfs nvme_core.default_ps_max_latency_us=0 rw quiet"
             )
         else:
             vol_uuid = uuid_btrfs

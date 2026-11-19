@@ -271,7 +271,7 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
                     f"    volume {uuid_btrfs}",
                     f"    loader /{os_id}/@/boot/{kernels[-1].name}",
                     f"    initrd /{os_id}/@/boot/{initrds[-1].name}",
-                    f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet"',
+                    f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rootfstype=btrfs rw quiet"',
                     "}",
                     "",
                 ])
