@@ -187,10 +187,6 @@ def add_or_reinstall_single_os(p_efi: str, p_boot: str, p_btrfs: str):
         return
 
     installer.prepare_installer_cache()
-    installer.merge_cache_directory(
-        POOL_MNT / "shared" / "@libvirt" / ".multiboot_installer_cache",
-        installer.CACHE_DIR,
-    )
     distro = installer.select_distros(single_mode=True)[0]
     os_id = distro["id"]
 

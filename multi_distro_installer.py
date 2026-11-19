@@ -15,6 +15,7 @@ from pathlib import Path
 
 CACHE_DIR = Path("/tmp/multiboot_installer_cache")
 LEGACY_CACHE_DIR = Path("/var/cache/multiboot_installer")
+REFIND_CACHE_DIR = Path("/var/tmp/multiboot_installer_cache")
 MOK_DIR = CACHE_DIR / "mok"
 MOUNT_ROOT = Path("/mnt/multiboot_target")
 BTRFS_OPTS = "defaults,noatime,compress=zstd:1,space_cache=v2"
@@ -204,6 +205,49 @@ def merge_cache_directory(source: Path, destination: Path):
     source.rmdir()
 
 
+def prepare_target_package_cache(target: Path) -> Path:
+    cache_root = target / "var" / "lib" / "libvirt" / "images" / ".multiboot_installer_cache"
+    if cache_root.is_symlink():
+        sys.exit(f"Error: Package cache path must not be a symlink: {cache_root}")
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    for source_root in (CACHE_DIR, LEGACY_CACHE_DIR):
+        if source_root.is_symlink() or not source_root.is_dir():
+            continue
+        for source in list(source_root.iterdir()):
+            if (
+                source.is_dir()
+                and not source.is_symlink()
+                and source.name.startswith(("fedora_", "debian_", "alpine_"))
+            ):
+                print(f"Moving package cache from {source} to target storage.")
+                merge_cache_directory(source, cache_root / source.name)
+
+    alpine_arch = get_arch_spec()["alpine_arch"]
+    alpine_cache = cache_root / f"alpine_{alpine_arch}"
+    alpine_cache.mkdir(parents=True, exist_ok=True)
+    for source_root in (CACHE_DIR, LEGACY_CACHE_DIR, cache_root):
+        if source_root.is_symlink() or not source_root.is_dir():
+            continue
+        for suffix in ("", ".part"):
+            source = source_root / f"alpine-minirootfs-{alpine_arch}.tar.gz{suffix}"
+            destination = alpine_cache / source.name
+            if source == destination or source.is_symlink() or not source.is_file():
+                continue
+            if destination.is_symlink():
+                sys.exit(f"Error: Alpine rootfs cache path must not be a symlink: {destination}")
+            if destination.exists() and not destination.is_file():
+                sys.exit(f"Error: Expected a file at the Alpine rootfs cache path: {destination}")
+            if destination.is_file() and destination.stat().st_size >= source.stat().st_size:
+                source.unlink()
+                continue
+            if destination.exists():
+                destination.unlink()
+            print(f"Moving cached Alpine rootfs download to target storage: {destination}")
+            shutil.move(source, destination)
+    return cache_root
+
+
 def prepare_installer_cache():
     if CACHE_DIR.is_symlink():
         sys.exit(f"Error: Installer cache path must not be a symlink: {CACHE_DIR}")
@@ -211,27 +255,6 @@ def prepare_installer_cache():
     if not CACHE_DIR.is_dir() or CACHE_DIR.stat().st_uid != os.geteuid():
         sys.exit(f"Error: Installer cache must be a directory owned by the current user: {CACHE_DIR}")
     CACHE_DIR.chmod(0o700)
-    if LEGACY_CACHE_DIR.exists():
-        print(f"Reusing existing downloads from {LEGACY_CACHE_DIR}.")
-        merge_cache_directory(LEGACY_CACHE_DIR, CACHE_DIR)
-    for target_cache in MOUNT_ROOT.glob("*/var/lib/libvirt/images/.multiboot_installer_cache"):
-        if target_cache.is_dir():
-            print(f"Reusing existing downloads from {target_cache}.")
-            merge_cache_directory(target_cache, CACHE_DIR)
-    for target_iso in MOUNT_ROOT.glob("*/var/lib/libvirt/images/virtio-win.iso"):
-        cached_iso = CACHE_DIR / "virtio-win.iso"
-        if (
-            target_iso.is_file()
-            and target_iso.stat().st_size > 0
-            and (not cached_iso.is_file() or cached_iso.stat().st_size == 0)
-        ):
-            print(f"Reusing existing download from {target_iso}.")
-            shutil.copy2(target_iso, cached_iso)
-    for partial_iso in MOUNT_ROOT.glob("*/var/lib/libvirt/images/virtio-win.iso.part"):
-        cached_partial = CACHE_DIR / "virtio-win.iso.part"
-        if partial_iso.is_file() and partial_iso.stat().st_size > 0 and not cached_partial.exists():
-            print(f"Resuming existing download from {partial_iso}.")
-            shutil.copy2(partial_iso, cached_partial)
 
 
 def download_cached_file(url: str, destination: Path):
@@ -278,9 +301,60 @@ def locate_refind_assets() -> tuple[Path | None, Path | None]:
 
 def stage_upstream_refind():
     """Downloads and extracts upstream refind-bin into /usr/share/refind if missing."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = CACHE_DIR / f"refind-bin-{REFIND_VERSION}.zip"
-    extract_dir = CACHE_DIR / "refind_extracted"
+    if REFIND_CACHE_DIR.is_symlink():
+        sys.exit(f"Error: rEFInd cache path must not be a symlink: {REFIND_CACHE_DIR}")
+    REFIND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if not REFIND_CACHE_DIR.is_dir() or REFIND_CACHE_DIR.stat().st_uid != os.geteuid():
+        sys.exit(f"Error: rEFInd cache must be a directory owned by the current user: {REFIND_CACHE_DIR}")
+    REFIND_CACHE_DIR.chmod(0o700)
+    zip_path = REFIND_CACHE_DIR / f"refind-bin-{REFIND_VERSION}.zip"
+    target_partial = zip_path.with_name(f"{zip_path.name}.part")
+    if zip_path.is_symlink() or target_partial.is_symlink():
+        sys.exit(f"Error: rEFInd cache files must not be symlinks: {zip_path}")
+    if zip_path.exists() and not zip_path.is_file():
+        sys.exit(f"Error: Expected a file at the rEFInd cache path: {zip_path}")
+    if target_partial.exists() and not target_partial.is_file():
+        sys.exit(f"Error: Expected a file at the partial rEFInd cache path: {target_partial}")
+
+    cache_sources = (CACHE_DIR, LEGACY_CACHE_DIR)
+    for source_root in cache_sources:
+        if source_root.is_symlink() or not source_root.is_dir():
+            continue
+        cached_zip = source_root / zip_path.name
+        if cached_zip.is_symlink() or not cached_zip.is_file() or cached_zip.stat().st_size == 0:
+            continue
+        if not zip_path.is_file() or cached_zip.stat().st_size > zip_path.stat().st_size:
+            if zip_path.exists():
+                zip_path.unlink()
+            if target_partial.exists():
+                target_partial.unlink()
+            shutil.move(cached_zip, zip_path)
+        else:
+            cached_zip.unlink()
+
+    if not zip_path.is_file() or zip_path.stat().st_size == 0:
+        for source_root in cache_sources:
+            if source_root.is_symlink() or not source_root.is_dir():
+                continue
+            cached_partial = source_root / f"{zip_path.name}.part"
+            if cached_partial.is_symlink() or not cached_partial.is_file():
+                continue
+            if not target_partial.is_file() or cached_partial.stat().st_size > target_partial.stat().st_size:
+                if target_partial.exists():
+                    target_partial.unlink()
+                shutil.move(cached_partial, target_partial)
+            else:
+                cached_partial.unlink()
+    else:
+        if target_partial.exists():
+            target_partial.unlink()
+        for source_root in cache_sources:
+            if source_root.is_symlink() or not source_root.is_dir():
+                continue
+            cached_partial = source_root / f"{zip_path.name}.part"
+            if cached_partial.is_file() and not cached_partial.is_symlink():
+                cached_partial.unlink()
+    extract_dir = REFIND_CACHE_DIR / "refind_extracted"
 
     download_cached_file(REFIND_ZIP_URL, zip_path)
 
@@ -294,6 +368,7 @@ def stage_upstream_refind():
     if dest_root.exists():
         shutil.rmtree(dest_root)
     shutil.copytree(src_root, dest_root)
+    shutil.rmtree(extract_dir)
 
 
 def preflight_check():
@@ -674,16 +749,37 @@ def prepare_alpine_cache(target_root: Path, cache_dir: Path):
 
 
 def provision_virtio_win_iso(target_root: Path):
-    cached_iso = CACHE_DIR / "virtio-win.iso"
     libvirt_images = target_root / "var" / "lib" / "libvirt" / "images"
     libvirt_images.mkdir(parents=True, exist_ok=True)
     target_iso = libvirt_images / "virtio-win.iso"
+    target_partial = target_iso.with_name(f"{target_iso.name}.part")
+    if target_iso.is_symlink() or target_partial.is_symlink():
+        sys.exit(f"Error: VirtIO ISO paths must not be symlinks: {target_iso}")
+    if target_partial.exists() and not target_partial.is_file():
+        sys.exit(f"Error: Expected a file at the partial VirtIO ISO path: {target_partial}")
     if target_iso.is_file() and target_iso.stat().st_size > 0:
         return
     if target_iso.exists() and not target_iso.is_file():
         sys.exit(f"Error: Expected a file at the VirtIO ISO path: {target_iso}")
-    download_cached_file(VIRTIO_WIN_URL, cached_iso)
-    shutil.copy2(cached_iso, target_iso)
+    cached_iso = CACHE_DIR / target_iso.name
+    if not cached_iso.is_symlink() and cached_iso.is_file() and cached_iso.stat().st_size > 0:
+        print(f"Moving cached VirtIO ISO to target storage: {target_iso}")
+        shutil.move(cached_iso, target_iso)
+    else:
+        cached_partial = cached_iso.with_name(f"{cached_iso.name}.part")
+        if (
+            not cached_partial.is_symlink()
+            and cached_partial.is_file()
+            and cached_partial.stat().st_size > 0
+        ):
+            if target_partial.is_file() and target_partial.stat().st_size >= cached_partial.stat().st_size:
+                cached_partial.unlink()
+            else:
+                if target_partial.exists():
+                    target_partial.unlink()
+                print(f"Moving partial VirtIO ISO download to target storage: {target_partial}")
+                shutil.move(cached_partial, target_partial)
+        download_cached_file(VIRTIO_WIN_URL, target_iso)
     target_iso.chmod(0o644)
 
 
@@ -851,7 +947,10 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
 
     extra_binds: list[tuple[Path, Path]] = []
     if dtype == "alpine":
-        alpine_apk_cache = CACHE_DIR / f"alpine_{get_arch_spec()['alpine_arch']}" / "apk"
+        alpine_apk_cache = (
+            target / "var" / "lib" / "libvirt" / "images"
+            / ".multiboot_installer_cache" / f"alpine_{get_arch_spec()['alpine_arch']}" / "apk"
+        )
         alpine_apk_cache.mkdir(parents=True, exist_ok=True)
         extra_binds.append((alpine_apk_cache, target / "var" / "cache" / "apk"))
 
@@ -960,6 +1059,7 @@ def bootstrap_distro(
         (target / mnt).mkdir(parents=True, exist_ok=True)
         run(["mount", "-o", f"subvol={sv_path},{opts}", p_btrfs, str(target / mnt)])
 
+    package_cache_root = prepare_target_package_cache(target)
     if distro["dm_subvol"]:
         dm_path = target / distro["dm_mount"].lstrip("/")
         dm_path.mkdir(parents=True, exist_ok=True)
@@ -977,7 +1077,7 @@ def bootstrap_distro(
 
     if distro["type"] == "fedora":
         prepare_fedora_installroot(target)
-        fedora_cache = CACHE_DIR / f"fedora_{arch['fedora_arch']}"
+        fedora_cache = package_cache_root / f"fedora_{arch['fedora_arch']}"
         fedora_cache.mkdir(parents=True, exist_ok=True)
         cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={fedora_cache}"]
         cmd = [
@@ -990,7 +1090,7 @@ def bootstrap_distro(
         with chroot_env(target, mount_run=False, mount_efivars=False):
             run(cmd)
     elif distro["type"] == "debian":
-        deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
+        deb_cache = package_cache_root / f"debian_{arch['debian_arch']}"
         deb_cache.mkdir(parents=True, exist_ok=True)
         run([
             "debootstrap", f"--arch={arch['debian_arch']}", f"--cache-dir={deb_cache}",
@@ -1023,7 +1123,8 @@ def bootstrap_distro(
             )
     elif distro["type"] == "alpine":
         a_arch = arch["alpine_arch"]
-        alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
+        alpine_cache = package_cache_root / f"alpine_{a_arch}"
+        alpine_tar = alpine_cache / f"alpine-minirootfs-{a_arch}.tar.gz"
         url = (
             f"https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/releases/{a_arch}/"
             f"alpine-minirootfs-{ALPINE_VERSION}-{a_arch}.tar.gz"
@@ -1031,13 +1132,13 @@ def bootstrap_distro(
         download_cached_file(url, alpine_tar)
         run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
         shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
-        alpine_apk_cache = CACHE_DIR / f"alpine_{a_arch}" / "apk"
+        alpine_apk_cache = package_cache_root / f"alpine_{a_arch}" / "apk"
         prepare_alpine_cache(target, alpine_apk_cache)
         with chroot_env(target, [(alpine_apk_cache, target / "var" / "cache" / "apk")]):
             chroot_run(
                 target,
                 [
-                    "/sbin/apk", "add",
+                    "env", "TMPDIR=/var/tmp", "/sbin/apk", "add",
                     "alpine-base", "linux-lts", "btrfs-progs", "openrc",
                     arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
                     arch["alpine_efi_pkg"], "swtpm", "virt-install",
