@@ -22,6 +22,8 @@ BTRFS_NOCOW_OPTS = "defaults,noatime,nodatacow"
 VIRTIO_WIN_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 REFIND_VERSION = "0.14.2"
 REFIND_ZIP_URL = f"https://sourceforge.net/projects/refind/files/{REFIND_VERSION}/refind-bin-{REFIND_VERSION}.zip/download"
+ALPINE_BRANCH = "v3.24"
+ALPINE_VERSION = "3.24.4"
 
 DISTROS = {
     "1": {
@@ -722,7 +724,7 @@ def configure_snapper_baseline(target: Path, p_btrfs: str, distro: dict, user_cf
     did = distro["id"]
     dtype = distro["type"]
     if dtype == "alpine":
-        print("Snapper is not available in Alpine v3.20 repositories; leaving its snapshots subvolume empty.")
+        print(f"Snapper is not available in Alpine {ALPINE_BRANCH} repositories; leaving its snapshots subvolume empty.")
         return
 
     uname = user_cfg["username"]
@@ -1016,8 +1018,8 @@ def bootstrap_distro(
         a_arch = arch["alpine_arch"]
         alpine_tar = CACHE_DIR / f"alpine-minirootfs-{a_arch}.tar.gz"
         url = (
-            f"https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/{a_arch}/"
-            f"alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
+            f"https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/releases/{a_arch}/"
+            f"alpine-minirootfs-{ALPINE_VERSION}-{a_arch}.tar.gz"
         )
         download_cached_file(url, alpine_tar)
         run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
