@@ -121,6 +121,29 @@ def run(cmd: list, check: bool = True, input_text: str | None = None):
     return subprocess.run(cmd, check=check, text=True, input=input_text)
 
 
+def set_chroot_passwords(target: Path, username: str, password: str):
+    def hash_password() -> str:
+        result = subprocess.run(
+            ["openssl", "passwd", "-6", "-stdin"],
+            check=True,
+            capture_output=True,
+            text=True,
+            input=f"{password}\n",
+        )
+        password_hash = result.stdout.strip()
+        if not password_hash.startswith("$6$"):
+            raise RuntimeError("OpenSSL did not produce a SHA-512 crypt password hash.")
+        return password_hash
+
+    root_hash = hash_password()
+    user_hash = hash_password()
+    chroot_run(
+        target,
+        ["chpasswd", "--encrypted"],
+        input_text=f"root:{root_hash}\n{username}:{user_hash}\n",
+    )
+
+
 def merge_cache_directory(source: Path, destination: Path):
     if not source.exists():
         return
@@ -797,7 +820,7 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
                 ["useradd", "-m", "-u", uid, "-g", gid, "-G", f"{admin_group},libvirt,kvm", "-s", "/bin/bash", uname],
                 check=False,
             )
-            chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
+            set_chroot_passwords(target, uname, passwd)
             sudoers_dropin = target / "etc" / "sudoers.d" / f"10-{admin_group}"
             sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
             sudoers_dropin.write_text(f"%{admin_group} ALL=(ALL:ALL) ALL\n")
@@ -827,7 +850,7 @@ def configure_post_chroot(target: Path, p_btrfs: str, distro: dict, user_cfg: di
                 ],
                 check=False,
             )
-            chroot_run(target, ["chpasswd"], input_text=f"root:{passwd}\n{uname}:{passwd}\n")
+            set_chroot_passwords(target, uname, passwd)
             sudoers_dropin = target / "etc" / "sudoers.d" / "10-wheel"
             sudoers_dropin.parent.mkdir(parents=True, exist_ok=True)
             sudoers_dropin.write_text("%wheel ALL=(ALL:ALL) ALL\n")
