@@ -739,7 +739,7 @@ def bootstrap_distro(
     if distro["type"] == "fedora":
         cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={CACHE_DIR}/fedora_{arch['fedora_arch']}"]
         cmd = [
-            "dnf", "-y", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}", "--releasever=41",
+            "dnf", "-y", "--use-host-config", f"--installroot={target}", f"--forcearch={arch['fedora_arch']}",
             "install", "@core", "@virtualization", arch["fedora_efi_pkg"], "swtpm", "swtpm-tools",
             "kernel", "btrfs-progs", "snapper", "libdnf5-plugin-actions",
             "sudo", "akmods", "kmodtool", "openssl", "mokutil",
