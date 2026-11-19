@@ -311,9 +311,16 @@ def preflight_check():
 
 
 @contextmanager
-def chroot_env(target: Path, extra_binds: list[tuple[Path, Path]] | None = None):
-    binds = ["dev", "dev/pts", "proc", "sys", "run"]
-    if Path("/sys/firmware/efi/efivars").is_dir():
+def chroot_env(
+    target: Path,
+    extra_binds: list[tuple[Path, Path]] | None = None,
+    mount_run: bool = True,
+    mount_efivars: bool = True,
+):
+    binds = ["dev", "dev/pts", "proc", "sys"]
+    if mount_run:
+        binds.append("run")
+    if mount_efivars and Path("/sys/firmware/efi/efivars").is_dir():
         binds.append("sys/firmware/efi/efivars")
 
     mounted = []
@@ -918,7 +925,8 @@ def bootstrap_distro(
             "sudo", "akmods", "kmodtool", "openssl", "mokutil",
             f"shim-{sfx}", f"grub2-efi-{sfx}", distro["desktop"],
         ] + cache_arg
-        run(cmd)
+        with chroot_env(target, mount_run=False, mount_efivars=False):
+            run(cmd)
     elif distro["type"] == "debian":
         deb_cache = CACHE_DIR / f"debian_{arch['debian_arch']}"
         deb_cache.mkdir(parents=True, exist_ok=True)
