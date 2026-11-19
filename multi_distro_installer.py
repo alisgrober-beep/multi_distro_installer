@@ -891,8 +891,13 @@ def bootstrap_distro(
         a_arch = arch["alpine_arch"]
         alpine_tar = cache_dir / f"alpine-minirootfs-{a_arch}.tar.gz"
         if source_mode == "internet" or not alpine_tar.exists():
-            url = f"alpinelinux.org{a_arch}/alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
-            run(["curl", "-L", "-o", str(alpine_tar), url])
+            url = (
+                f"https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/{a_arch}/"
+                f"alpine-minirootfs-3.20.3-{a_arch}.tar.gz"
+            )
+            partial_tar = alpine_tar.with_name(f"{alpine_tar.name}.part")
+            run(["curl", "-L", "--fail", "-o", str(partial_tar), url])
+            partial_tar.replace(alpine_tar)
         run(["tar", "-xzf", str(alpine_tar), "-C", str(target)])
         shutil.copy("/etc/resolv.conf", target / "etc" / "resolv.conf")
         with chroot_env(target):
