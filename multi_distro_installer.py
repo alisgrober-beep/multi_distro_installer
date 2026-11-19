@@ -504,6 +504,17 @@ def create_distro_swapfile(target_root: Path, distro_id: str, size_gb: int):
         run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size_gb}g", str(swap_file)])
 
 
+def prepare_fedora_installroot(target_root: Path):
+    etc_dir = target_root / "etc"
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    passwd_file = etc_dir / "passwd"
+    group_file = etc_dir / "group"
+    if not passwd_file.exists():
+        passwd_file.write_text("root:x:0:0:root:/root:/bin/bash\n")
+    if not group_file.exists():
+        group_file.write_text("root:x:0:\n")
+
+
 def installer_cache_dir(target_root: Path) -> Path:
     cache_dir = target_root / "var" / "lib" / "libvirt" / "images" / ".multiboot_installer_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -841,6 +852,7 @@ def bootstrap_distro(
     print(f"\n=== Bootstrapping {distro['name']} ({arch['family']} + KVM/UEFI/swtpm / {source_mode}) ===")
 
     if distro["type"] == "fedora":
+        prepare_fedora_installroot(target)
         fedora_cache = cache_dir / f"fedora_{arch['fedora_arch']}"
         fedora_cache.mkdir(parents=True, exist_ok=True)
         cache_arg = ["--setopt=keepcache=True", f"--setopt=cachedir={fedora_cache}"]

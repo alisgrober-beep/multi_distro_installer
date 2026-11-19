@@ -62,7 +62,7 @@ MULTIBOOT_POOL (subvolid=5)
 ## Prerequisites & Live Environment
 
 - Recommended Live ISO: Boot from a Fedora Workstation or KDE Live ISO (aarch64 or x86_64) in UEFI mode. Fedora Live works with UEFI Secure Boot enabled out of the box and includes `dnf5` and `btrfs-progs >= 6.1`.
-- Fedora bootstrap uses the live host's DNF configuration and repositories, so the installed Fedora release follows the live environment's configured release.
+- Fedora bootstrap seeds root account files for RPM lookup, then uses the live host's DNF configuration and repositories so the installed Fedora release follows the live environment's configured release.
 - Large bootstrap caches are stored on the target disk under `shared/@libvirt/.multiboot_installer_cache`; the VirtIO driver ISO is stored directly under `shared/@libvirt`. This avoids filling the Live ISO's writable overlay, and existing host-side package caches and ISO files are moved there when needed.
 - Automatic Dependency Resolution: `preflight_check()` automatically detects your architecture, checks UEFI mode, installs missing host CLI tools (`debootstrap`, `sbsigntools`, `mokutil`, `efibootmgr`, `gdisk`, `parted`, `dosfstools`, `e2fsprogs`), and stages upstream rEFInd (0.14.2) before touching any disk.
 - Verified Upstream Sources: The installer downloads the official direct URLs for rEFInd 0.14.2 from SourceForge and the stable `virtio-win.iso` from Fedora People, so the bootstrapper and VM helper match the actual upstream artifacts they claim to fetch.
