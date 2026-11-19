@@ -10,7 +10,7 @@ Designed for developers who frequently hop across Linux distributions (Fedora, D
 - Automated Preflight & Self-Bootstrapping (`preflight_check`): Validates UEFI boot mode, verifies `btrfs-progs >= 6.1`, auto-installs missing host CLI tools (`debootstrap`, `sbsigntools`, `mokutil`, `efibootmgr`) via `dnf`/`apt-get`, and stages upstream rEFInd (0.14.2) binaries and Btrfs EFI drivers.
 - Folder-Isolated Btrfs Subvolume Hierarchy: Every OS lives inside its own top-level directory (`<os_id>/@*`) in `subvolid=5`, eliminating cross-distro file collisions while sharing `shared/@projects`, `shared/@containers`, `shared/@libvirt`, and `shared/@swap`.
 - End-to-End UEFI Secure Boot: Chains Microsoft-CA-signed shim → locally MOK-signed rEFInd (`grub<arch>.efi`) + MOK-signed `btrfs_<arch>.efi` → signed kernels and automatic out-of-tree module signing (`akmods` on Fedora, `DKMS` on Debian, `kernel-hooks.d` on Alpine).
-- Automated Snapper Baseline & Rollbacks: Initializes Snapper (`root` config) mapped to `<os_id>/@snapshots`, configures automatic `dnf5`/`apt` pre/post transaction hooks and OpenRC cron jobs, and captures an immediate `Snapshot #1` clean baseline.
+- Automated Snapper Baseline & Rollbacks: Fedora and Debian initialize Snapper (`root` config) mapped to `<os_id>/@snapshots` and capture an immediate clean baseline; Fedora also adds DNF5 transaction hooks. Alpine 3.20 does not package Snapper, so its `@snapshots` subvolume remains empty.
 - Cross-Distro Windows 11 KVM Provisioning (`win11_vm.py`): Provisions NVMe-tuned qcow2 disks (`nodatacow`, `discard='unmap'`, `io='native'`) with UEFI Secure Boot (`AAVMF` / `OVMF`), virtual TPM 2.0 (`swtpm`), `virtio-win.iso`, and unattended `autounattend.xml` driver injection inside `shared/@libvirt`—re-attachable across any booted distro in one command.
 
 ## Supported Target Operating Systems (arm64 & amd64)
@@ -97,8 +97,8 @@ Run `multiboot_maint.py` from any booted distro or from a Live USB:
 sudo ./multiboot_maint.py
 ```
 
-1. Inspect Pool & Snapshots: Lists `shared/` and `<os_id>/` subvolumes, marks the currently booted OS, and shows Snapper snapshot IDs.
-2. Atomic Snapper Rollback: Moves `<os_id>/@` aside to `@_pre_rollback_<timestamp>` and snapshots your chosen Snapper ID into `<os_id>/@`.
+1. Inspect Pool & Snapshots: Lists `shared/` and `<os_id>/` subvolumes, marks the currently booted OS, and shows Snapper snapshot IDs when available (Fedora and Debian).
+2. Atomic Snapper Rollback: Moves `<os_id>/@` aside to `@_pre_rollback_<timestamp>` and snapshots your chosen Fedora or Debian Snapper ID into `<os_id>/@`.
 3. Wipe Single OS: Deletes all snapshots, subvolumes, swapfile, and rEFInd stanza for one OS while keeping `shared/` untouched.
 4. Sync rEFInd Kernels: Updates `refind.conf` after kernel upgrades or rollbacks.
 5. Add / Reinstall Single OS: Deploys a new distro folder (or cleanly replaces an existing one) using your existing enrolled MOK keys. The maintenance helper follows the same single-distro selector contract as the installer, so it resolves the chosen distro as the first item from the valid selection list.

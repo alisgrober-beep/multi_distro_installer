@@ -98,6 +98,7 @@ def get_arch_spec() -> dict[str, str]:
             "debian_qemu_pkg": "qemu-system-arm",
             "debian_efi_pkg": "qemu-efi-aarch64",
             "fedora_efi_pkg": "edk2-aarch64",
+            "alpine_efi_pkg": "aavmf",
         }
     if raw in ("x86_64", "amd64"):
         return {
@@ -110,6 +111,7 @@ def get_arch_spec() -> dict[str, str]:
             "debian_qemu_pkg": "qemu-system-x86",
             "debian_efi_pkg": "ovmf",
             "fedora_efi_pkg": "edk2-ovmf",
+            "alpine_efi_pkg": "ovmf",
         }
     sys.exit(f"Error: Unsupported CPU architecture '{raw}'. Supported: arm64/aarch64, amd64/x86_64.")
 
@@ -658,6 +660,10 @@ def generate_fstab(target_root: Path, p_efi: str, p_boot: str, p_btrfs: str, dis
 def configure_snapper_baseline(target: Path, p_btrfs: str, distro: dict, user_cfg: dict):
     did = distro["id"]
     dtype = distro["type"]
+    if dtype == "alpine":
+        print("Snapper is not available in Alpine v3.20 repositories; leaving its snapshots subvolume empty.")
+        return
+
     uname = user_cfg["username"]
     snap_mnt = target / ".snapshots"
     snap_subvol_path = f"{did}/@snapshots"
@@ -701,18 +707,6 @@ def configure_snapper_baseline(target: Path, p_btrfs: str, distro: dict, user_cf
             chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
         elif dtype == "debian":
             chroot_run(target, ["systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer"], check=False)
-        elif dtype == "alpine":
-            cron_daily = target / "etc" / "periodic" / "daily" / "snapper"
-            cron_daily.parent.mkdir(parents=True, exist_ok=True)
-            cron_daily.write_text(
-                "#!/bin/sh\n"
-                "/usr/bin/snapper --no-dbus -c root create --type=single --cleanup-algorithm=timeline "
-                '--description="daily-timeline"\n'
-                "/usr/bin/snapper --no-dbus -c root cleanup timeline\n"
-                "/usr/bin/snapper --no-dbus -c root cleanup number\n"
-            )
-            cron_daily.chmod(0o755)
-            chroot_run(target, ["rc-update", "add", "crond", "default"], check=False)
 
         chroot_run(
             target,
@@ -976,9 +970,9 @@ def bootstrap_distro(
                 target,
                 [
                     "/sbin/apk", "add",
-                    "alpine-base", "linux-lts", "btrfs-progs", "snapper", "openrc",
+                    "alpine-base", "linux-lts", "btrfs-progs", "openrc",
                     arch["qemu_system"], "qemu-img", "libvirt-daemon", "libvirt-client",
-                    arch["fedora_efi_pkg"], "swtpm", "virt-install",
+                    arch["alpine_efi_pkg"], "swtpm", "virt-install",
                     *distro["desktop"].split(),
                 ],
             )
