@@ -1218,7 +1218,12 @@ def setup_refind_and_shim(
     efi_mnt.mkdir(parents=True, exist_ok=True)
     run(["mount", p_efi, str(efi_mnt)])
     uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
-    uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip()
+    partuuid_btrfs = subprocess.check_output(
+        ["blkid", "-s", "PARTUUID", "-o", "value", p_btrfs], text=True
+    ).strip()
+    partuuid_boot = subprocess.check_output(
+        ["blkid", "-s", "PARTUUID", "-o", "value", p_boot], text=True
+    ).strip()
     shim_name = f"shim{sfx}.efi"
     mm_name = f"mm{sfx}.efi"
     grub_name = f"grub{sfx}.efi"
@@ -1301,26 +1306,26 @@ def setup_refind_and_shim(
             print(f"Warning: No kernel/initrd pair found for {d['name']}; skipping rEFInd stanza.")
             continue
         if dtype == "fedora":
-            vol_uuid = uuid_boot
+            volume_id = partuuid_boot
             options = (
                 f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
                 f"nvme_core.default_ps_max_latency_us=0 rw quiet rhgb"
             )
         elif dtype == "debian":
-            vol_uuid = uuid_btrfs
+            volume_id = partuuid_btrfs
             options = (
                 f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
                 f"rootfstype=btrfs nvme_core.default_ps_max_latency_us=0 rw quiet"
             )
         else:
-            vol_uuid = uuid_btrfs
+            volume_id = partuuid_btrfs
             options = (
                 f"root=UUID={uuid_btrfs} rootflags=subvol={did}/@ "
                 f"modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"
             )
         stanzas.extend([
             f'menuentry "{d["name"]} (Secure Boot)" {{',
-            f"    volume {vol_uuid}",
+            f"    volume {volume_id}",
             f"    loader {kernel}",
             f"    initrd {initrd}",
             f'    options "{options}"',

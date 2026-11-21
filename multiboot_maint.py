@@ -219,7 +219,13 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
         return
 
     uuid_btrfs = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_btrfs], text=True).strip()
-    uuid_boot = subprocess.check_output(["blkid", "-s", "UUID", "-o", "value", p_boot], text=True).strip() if p_boot else ""
+    partuuid_btrfs = subprocess.check_output(
+        ["blkid", "-s", "PARTUUID", "-o", "value", p_btrfs], text=True
+    ).strip()
+    partuuid_boot = (
+        subprocess.check_output(["blkid", "-s", "PARTUUID", "-o", "value", p_boot], text=True).strip()
+        if p_boot else ""
+    )
 
     EFI_MNT.mkdir(parents=True, exist_ok=True)
     run(["mount", p_efi, str(EFI_MNT)])
@@ -254,7 +260,7 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
             if kernels and initrds:
                 stanzas.extend([
                     f'menuentry "{pretty_name} (Secure Boot)" {{',
-                    f"    volume {uuid_boot}",
+                    f"    volume {partuuid_boot}",
                     f"    loader /{kernels[-1].name}",
                     f"    initrd /{initrds[-1].name}",
                     f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet rhgb"',
@@ -268,7 +274,7 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
             if kernels and initrds:
                 stanzas.extend([
                     f'menuentry "{pretty_name} (Secure Boot)" {{',
-                    f"    volume {uuid_btrfs}",
+                    f"    volume {partuuid_btrfs}",
                     f"    loader /{os_id}/@/boot/{kernels[-1].name}",
                     f"    initrd /{os_id}/@/boot/{initrds[-1].name}",
                     f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rootfstype=btrfs rw quiet"',
@@ -282,7 +288,7 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
             if kernels and initrds:
                 stanzas.extend([
                     f'menuentry "{pretty_name} (Secure Boot)" {{',
-                    f"    volume {uuid_btrfs}",
+                    f"    volume {partuuid_btrfs}",
                     f"    loader /{os_id}/@/boot/{kernels[-1].name}",
                     f"    initrd /{os_id}/@/boot/{initrds[-1].name}",
                     f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ modules=sd-mod,usb-storage,btrfs rootfstype=btrfs rw"',
