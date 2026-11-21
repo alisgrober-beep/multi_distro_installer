@@ -257,12 +257,20 @@ def sync_refind_kernels(p_efi: str, p_boot: str, p_btrfs: str):
         if os_id.startswith("fedora") and p_boot:
             kernels = sorted(BOOT_MNT.glob("vmlinuz-*"))
             initrds = sorted(BOOT_MNT.glob("initramfs-*.img"))
-            if kernels and initrds:
+            paired = None
+            for kernel in reversed(kernels):
+                suffix = kernel.name.removeprefix("vmlinuz-")
+                initrd = BOOT_MNT / f"initramfs-{suffix}.img"
+                if initrd in initrds:
+                    paired = (kernel, initrd)
+                    break
+            if paired:
+                kernel, initrd = paired
                 stanzas.extend([
                     f'menuentry "{pretty_name} (Secure Boot)" {{',
                     f"    volume {partuuid_boot}",
-                    f"    loader /{kernels[-1].name}",
-                    f"    initrd /{initrds[-1].name}",
+                    f"    loader /{kernel.name}",
+                    f"    initrd /{initrd.name}",
                     f'    options "root=UUID={uuid_btrfs} rootflags=subvol={os_id}/@ rw quiet rhgb"',
                     "}",
                     "",

@@ -902,6 +902,27 @@ def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict[s
         shutil.copy2(mok["key"], akmods_priv / "private_key.priv")
         shutil.copy2(mok["der"], akmods_cert / "public_key.der")
         (akmods_priv / "private_key.priv").chmod(0o600)
+        for vmlinuz in sorted((target / "boot").glob("vmlinuz-*")):
+            tmp_output = vmlinuz.with_suffix(vmlinuz.suffix + ".signed")
+            run([
+                "sbsign",
+                "--key", str(mok["key"]),
+                "--cert", str(mok["crt"]),
+                "--output", str(tmp_output),
+                str(vmlinuz),
+            ])
+            shutil.move(tmp_output, vmlinuz)
+        install_dir = target / "etc" / "kernel" / "install.d"
+        install_dir.mkdir(parents=True, exist_ok=True)
+        hook = install_dir / "50-multiboot-sbsign.install"
+        hook.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "add" ] && [ -n "$2" ] && [ -f "$3" ]; then\n'
+            '  sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt '
+            '--output "$3.signed" "$3" && mv -f "$3.signed" "$3"\n'
+            "fi\n"
+        )
+        hook.chmod(0o755)
     elif dtype == "debian":
         dkms_mok_dir = target / "var" / "lib" / "shim-signed" / "mok"
         dkms_mok_dir.mkdir(parents=True, exist_ok=True)
@@ -914,6 +935,32 @@ def configure_secure_boot_module_signing(target: Path, distro: dict, mok: dict[s
             'mok_signing_key="/var/lib/shim-signed/mok/MOK.priv"\n'
             'mok_certificate="/var/lib/shim-signed/mok/MOK.der"\n'
         )
+        for vmlinuz in sorted((target / "boot").glob("vmlinuz-*")):
+            tmp_output = vmlinuz.with_suffix(vmlinuz.suffix + ".signed")
+            run([
+                "sbsign",
+                "--key", str(mok["key"]),
+                "--cert", str(mok["crt"]),
+                "--output", str(tmp_output),
+                str(vmlinuz),
+            ])
+            shutil.move(tmp_output, vmlinuz)
+        hook_dir = target / "etc" / "kernel" / "postinst.d"
+        hook_dir.mkdir(parents=True, exist_ok=True)
+        hook = hook_dir / "zz-multiboot-sbsign"
+        hook.write_text(
+            "#!/bin/sh\n"
+            'set -e\n'
+            'version="$1"\n'
+            '[ -n "$version" ] || exit 0\n'
+            'kernel="/boot/vmlinuz-$version"\n'
+            '[ -f "$kernel" ] || exit 0\n'
+            'tmp="$kernel.signed"\n'
+            'sbsign --key /etc/secureboot-mok/MOK.key --cert /etc/secureboot-mok/MOK.crt '
+            '--output "$tmp" "$kernel"\n'
+            'mv -f "$tmp" "$kernel"\n'
+        )
+        hook.chmod(0o755)
     elif dtype == "alpine":
         vmlinuz = target / "boot" / "vmlinuz-lts"
         if vmlinuz.exists():
@@ -1175,10 +1222,16 @@ def bootstrap_distro(
     if distro["type"] == "fedora":
         kernels = sorted(boot_dir.glob("vmlinuz-*"))
         initrds = sorted(boot_dir.glob("initramfs-*.img"))
-        if kernels:
-            kernel_file = f"/{kernels[-1].name}"
-        if initrds:
-            initrd_file = f"/{initrds[-1].name}"
+        if kernels and initrds:
+            kernel = kernels[-1]
+            kernel_suffix = kernel.name.removeprefix("vmlinuz-")
+            initrd = next(
+                (item for item in reversed(initrds) if item.name == f"initramfs-{kernel_suffix}.img"),
+                None,
+            )
+            if initrd:
+                kernel_file = f"/{kernel.name}"
+                initrd_file = f"/{initrd.name}"
     elif distro["type"] == "debian":
         kernels = sorted(boot_dir.glob("vmlinuz-*"))
         initrds = sorted(boot_dir.glob("initrd.img-*"))
